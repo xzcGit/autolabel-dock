@@ -1,0 +1,10 @@
+PyQt5>=5.15
+pyqtgraph>=0.13
+ultralytics>=8.0
+pyyaml>=6.0
+packaging>=20.0
+
+# Optional: LocateAnything-3B text-labeling backend (open-vocabulary detection).
+# NOT installed by default — the base app never imports these. Install with:
+#   pip install -e .[locateanything]
+# which pulls: transformers>=4.57,<4.58, accelerate, bitsandbytes, decord

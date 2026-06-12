@@ -1,0 +1,19 @@
+[project]
+name = "autolabel-dock"
+version = "0.1.0"
+requires-python = ">=3.10"
+
+[project.optional-dependencies]
+# Optional LocateAnything-3B open-vocabulary detection backend. NOT installed
+# by the base setup — install with `pip install -e .[locateanything]`. The base
+# app never imports these; the LocateAnything backend imports them lazily.
+locateanything = [
+    "transformers>=4.57,<4.58",
+    "accelerate",
+    "bitsandbytes",
+    "decord",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

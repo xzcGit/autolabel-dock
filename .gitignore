@@ -1,0 +1,34 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# ---- 测试 / 类型检查缓存 ----
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- 虚拟环境 ----
+.venv/
+venv/
+env/
+
+# ---- 模型权重: 不入库, 见 README 的下载说明 ----
+*.pt
+*.pth
+*.onnx
+
+# ---- 运行时生成 (ultralytics 训练/数据集) ----
+datasets/
+runs/
+*.log
+
+# ---- IDE / 编辑器 / 操作系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
