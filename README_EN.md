@@ -8,34 +8,9 @@
 
 **English** | [简体中文](README.md)
 
-## Table of Contents
-
-- [Screenshots](#screenshots)
-- [Features](#features)
-  - [Three annotation tasks](#three-annotation-tasks)
-  - [Annotation experience](#annotation-experience)
-  - [Model-assisted auto-labeling](#model-assisted-auto-labeling)
-  - [Tag subsystem](#tag-subsystem)
-  - [Training loop](#training-loop)
-  - [Model management](#model-management)
-  - [Data import / export](#data-import--export)
-  - [Data safety](#data-safety)
-- [Quick Start](#quick-start)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Running](#running)
-- [Model Weights](#model-weights)
-- [Optional: LocateAnything Text Labeling](#optional-locateanything-text-labeling)
-- [Platform Notes](#platform-notes)
-- [Project Structure](#project-structure)
-- [Contributing](#contributing)
-- [License](#license)
-
----
-
 AutoLabel Dock is a desktop image-annotation tool built on **PyQt5 + Ultralytics YOLOv8**. It runs cross-platform on Linux / macOS / Windows.
 
-It turns "annotation" and "training" into a single closed loop: label a batch of images manually (or with help from an existing model), confirm the results, train a custom YOLO model in one click, then use the new model to auto-label the rest of your data — every iteration leaves fewer boxes to fix by hand. It suits individuals and small teams who want to build datasets this way.
+It turns "annotation" and "training" into a single closed loop: label a batch of images manually (or with help from an existing model), confirm the results, train a custom YOLO model in one click, then use the new model to auto-label the rest of your data — every iteration leaves fewer boxes to fix by hand.
 
 > Note: the application UI is currently Chinese-only; this English README documents the project for international users.
 
@@ -291,3 +266,7 @@ This project is released under the **[AGPL-3.0](LICENSE)** license.
 > - **Ultralytics (YOLOv8)** — AGPL-3.0
 >
 > The strictest among the dependencies is AGPL-3.0, and this project aligns accordingly. To use it in a closed-source/commercial product, obtain the corresponding commercial licenses for those dependencies yourself (a PyQt commercial license, an Ultralytics enterprise license).
+
+## Links
+
+- **[Linux DO](https://linux.do/)**
