@@ -244,6 +244,12 @@ class MainWindow(QMainWindow):
         tags_action.triggered.connect(self._on_tag_manager)
         edit_menu.addAction(tags_action)
 
+        tools_menu = mb.addMenu("工具")
+
+        structure_action = QAction("模型结构查看器", self)
+        structure_action.triggered.connect(self._on_open_structure_viewer)
+        tools_menu.addAction(structure_action)
+
     def _set_project_dir_label(self, project_dir: Path | None) -> None:
         """Update the status bar label for the current project directory."""
         if project_dir is None:
@@ -306,6 +312,7 @@ class MainWindow(QMainWindow):
             self._train_panel.stop_requested.connect(self._on_stop_training)
             self._train_panel.preview_augmentation_requested.connect(self._on_preview_augmentation)
             self._train_panel.filter_changed.connect(self._on_train_tag_filter_changed)
+            self._train_panel.inspect_structure_requested.connect(self._on_train_inspect_requested)
             self._train_panel.set_template_registry(self._template_registry)
             self.tab_widget.addTab(self._train_panel, icon("train_tab"), "训练")
         # Push current tag registry into both label panel + train panel.
@@ -323,6 +330,7 @@ class MainWindow(QMainWindow):
             self._model_panel.model_delete_requested.connect(self._on_model_delete)
             self._model_panel.model_rename_requested.connect(self._on_model_rename)
             self._model_panel.model_import_requested.connect(self._on_model_import)
+            self._model_panel.model_inspect_requested.connect(self._on_model_inspect_requested)
             self.tab_widget.addTab(self._model_panel, icon("model_tab"), "模型")
 
         if self._script_tool_panel is None:
@@ -572,6 +580,50 @@ class MainWindow(QMainWindow):
                 self._model_panel.set_models(models)
             if self._train_panel:
                 self._train_panel.set_registered_models(models)
+
+    # ── Model structure viewer ───────────────────────────────
+
+    def _make_structure_dialog(self) -> "ModelStructureDialog":
+        """Build a ModelStructureDialog seeded with the current registry models.
+
+        MainWindow owns the ModelController + registry, so it constructs the
+        dialog (per the three-layer principle the panels only emit intent).
+        """
+        from src.ui.model_structure_dialog import ModelStructureDialog
+
+        models = self._model_registry.list_models() if self._model_registry else []
+        return ModelStructureDialog(self._model_ctrl, models, self)
+
+    def _on_open_structure_viewer(self) -> None:
+        """Menu entry: open the viewer with no preload (user picks a model)."""
+        dlg = self._make_structure_dialog()
+        dlg.exec_()
+
+    def _on_model_inspect_requested(self, model_id: str) -> None:
+        """ModelPanel「查看结构」: preload the selected registry model."""
+        dlg = self._make_structure_dialog()
+        dlg.load_from_registry(model_id)
+        dlg.exec_()
+
+    def _on_train_inspect_requested(self, model_path: str) -> None:
+        """TrainPanel「查看结构」: preload the current base model.
+
+        The resolved base-model string may be a registered model's stored path
+        or a pretrained weight name (e.g. "yolov8n.pt"). We load it as a file
+        path — the dialog surfaces a friendly error if it can't be found/parsed.
+        """
+        dlg = self._make_structure_dialog()
+        if model_path:
+            # Registered models store a path relative to the project dir; a
+            # pretrained weight (e.g. "yolov8n.pt") stays as-is. Resolve
+            # relative paths against the project so the parse can find the file.
+            p = Path(model_path)
+            if not p.is_absolute() and self._project is not None:
+                candidate = self._project.project_dir / p
+                if candidate.exists():
+                    p = candidate
+            dlg.load_from_path(p)
+        dlg.exec_()
 
     # ── Auto-label ───────────────────────────────────────────
 

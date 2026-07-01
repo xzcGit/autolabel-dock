@@ -9,6 +9,7 @@ from PyQt5.QtWidgets import QWidget, QFileDialog, QInputDialog, QMessageBox
 from src.core.project import ProjectManager
 from src.core.annotation import ImageAnnotation
 from src.core.label_io import load_annotation, save_annotation
+from src.core.model_structure import LayerInfo, ModelStructureError, parse_model_structure
 from src.engine.backends import get_backend
 from src.engine.backends.base import BackendError, PredictorProtocol
 from src.engine.model_manager import ModelRegistry, ModelInfo
@@ -110,6 +111,27 @@ class ModelController:
             logger.error("Failed to load model: %s", e, exc_info=True)
             QMessageBox.warning(self._parent, "加载失败", f"模型加载失败: {e}")
             return False
+
+    def inspect_model_structure(self, model_path: str | Path) -> list[LayerInfo]:
+        """Parse a .pt file's layer hierarchy on CPU. Thin passthrough to
+        ``core.model_structure.parse_model_structure``. Raises
+        ``ModelStructureError`` on bad/corrupt/non-YOLO files — callers show it
+        in a QMessageBox."""
+        logger.info("Inspecting model structure: %s", model_path)
+        return parse_model_structure(model_path)
+
+    def inspect_registered_model(self, model_id: str) -> list[LayerInfo]:
+        """Resolve a registered model's path (mirroring ``load_model``'s
+        relative→absolute logic) then parse its structure."""
+        if not self._registry or not self._project:
+            raise ModelStructureError("当前没有打开的项目或模型注册表")
+        model_info = self._registry.get(model_id)
+        if not model_info:
+            raise ModelStructureError("找不到指定的模型")
+        model_path = Path(model_info.path)
+        if not model_path.is_absolute():
+            model_path = self._project.project_dir / model_path
+        return self.inspect_model_structure(model_path)
 
     def delete_model(self, model_id: str) -> bool:
         """Delete model from registry (not file). Returns True if deleted."""

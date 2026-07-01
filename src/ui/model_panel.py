@@ -103,6 +103,7 @@ class ModelPanel(QWidget):
     model_delete_requested = pyqtSignal(str)
     model_rename_requested = pyqtSignal(str)
     model_import_requested = pyqtSignal()  # Request to import external .pt file
+    model_inspect_requested = pyqtSignal(str)  # Request to view structure of model by ID
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -150,11 +151,15 @@ class ModelPanel(QWidget):
         self._btn_compare = QPushButton("对比模型")
         set_button_role(self._btn_compare, "secondary")
         self._btn_compare.setToolTip("对比选中模型的指标")
+        self._btn_inspect = QPushButton("查看结构")
+        set_button_role(self._btn_inspect, "secondary")
+        self._btn_inspect.setToolTip("查看选中模型的层级结构（辅助设置 freeze）")
         btn_layout.addWidget(self._btn_load)
         btn_layout.addWidget(self._btn_delete)
         btn_layout.addWidget(self._btn_rename)
         btn_layout.addWidget(self._btn_import)
         btn_layout.addWidget(self._btn_compare)
+        btn_layout.addWidget(self._btn_inspect)
         list_layout.addLayout(btn_layout)
 
         left_layout.addWidget(list_group, 1)
@@ -244,6 +249,7 @@ class ModelPanel(QWidget):
         self._btn_rename.clicked.connect(self._on_rename)
         self._btn_import.clicked.connect(lambda: self.model_import_requested.emit())
         self._btn_compare.clicked.connect(self._on_compare)
+        self._btn_inspect.clicked.connect(self._on_inspect)
 
     def set_models(self, models: list[ModelInfo]) -> None:
         """Update the model list."""
@@ -342,6 +348,12 @@ class ModelPanel(QWidget):
         models = [m for m in self._models if m.id in selected_ids]
         dlg = ModelCompareDialog(models, self)
         dlg.exec_()
+
+    def _on_inspect(self) -> None:
+        """Request to view the layer structure of the selected model."""
+        model_id = self._get_selected_id()
+        if model_id:
+            self.model_inspect_requested.emit(model_id)
 
 
 class ModelCompareDialog(QDialog):

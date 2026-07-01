@@ -192,6 +192,7 @@ class TrainPanel(QWidget):
     stop_requested = pyqtSignal()
     preview_augmentation_requested = pyqtSignal(dict)  # augmentation params dict
     filter_changed = pyqtSignal(object)  # TagFilter — re-emitted from inner TagFilterBar
+    inspect_structure_requested = pyqtSignal(str)  # base model path to inspect
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -304,6 +305,15 @@ class TrainPanel(QWidget):
         self._freeze_default_check = QCheckBox("使用默认值")
         self._freeze_default_check.setChecked(True)
         freeze_layout.addWidget(self._freeze_default_check)
+
+        self._btn_inspect_structure = QPushButton("查看结构")
+        set_button_role(self._btn_inspect_structure, "secondary")
+        self._btn_inspect_structure.setToolTip("查看当前基础模型的层级结构（辅助设置 freeze）")
+        self._btn_inspect_structure.clicked.connect(
+            lambda: self.inspect_structure_requested.emit(self._resolve_model_path())
+        )
+        freeze_layout.addWidget(self._btn_inspect_structure)
+        freeze_layout.addStretch()
         hyper_form.addRow("Freeze:", freeze_row)
 
         self._workers_spin = QSpinBox()
