@@ -25,6 +25,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QWidget,
 )
@@ -58,7 +59,7 @@ class LocateAnythingBar(QWidget):
             "启用 LocateAnything 文本标注后端（开放词汇，用自然语言描述要检测的目标）"
         )
         set_button_role(self._enable_btn, "secondary")
-        self._enable_btn.clicked.connect(self.enable_requested.emit)
+        self._enable_btn.clicked.connect(self._on_enable_clicked)
         self._layout.addWidget(self._enable_btn)
 
         # Loading / status label.
@@ -142,6 +143,20 @@ class LocateAnythingBar(QWidget):
         return prompt, target
 
     # ── Internals ───────────────────────────────────────────────────────--
+
+    def _on_enable_clicked(self) -> None:
+        """Confirm before enabling — the 文本标注 button is easy to mis-tap and
+        enabling LA is expensive (unloads YOLO, loads a VLM subprocess)."""
+        reply = QMessageBox.question(
+            self,
+            "启用文本标注",
+            "启用 LocateAnything 文本标注后端会占用较多显存，"
+            "并卸载当前已加载的 YOLO 模型，加载需要一些时间。\n是否继续？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            self.enable_requested.emit()
 
     def _rebuild_target_combo(self) -> None:
         prev = self._target_combo.currentData()

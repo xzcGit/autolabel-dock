@@ -1,6 +1,8 @@
 """UI tests for the LocateAnything toolbar bar."""
 from __future__ import annotations
 
+from PyQt5.QtWidgets import QMessageBox
+
 from src.ui.locateanything_bar import LocateAnythingBar, _AUTO_MATCH_LABEL
 
 
@@ -24,12 +26,24 @@ def test_enabled_state_shows_query_controls(qapp):
     assert bar._enable_btn.isHidden()
 
 
-def test_enable_request_signal(qapp):
+def test_enable_request_signal(qapp, monkeypatch):
+    # Clicking 文本标注 first shows a confirm dialog; accept it.
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
     bar = LocateAnythingBar()
     fired = []
     bar.enable_requested.connect(lambda: fired.append(True))
     bar._enable_btn.click()
     assert fired == [True]
+
+
+def test_enable_request_cancelled_does_not_emit(qapp, monkeypatch):
+    # Declining the confirm dialog must not emit enable_requested.
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.No)
+    bar = LocateAnythingBar()
+    fired = []
+    bar.enable_requested.connect(lambda: fired.append(True))
+    bar._enable_btn.click()
+    assert fired == []
 
 
 def test_disable_request_signal(qapp):
