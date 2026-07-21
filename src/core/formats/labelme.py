@@ -232,3 +232,16 @@ def import_labelme(input_dir: Path | str) -> list[ImageAnnotation]:
         ))
 
     return results
+
+
+def import_labelme_records(
+    input_dir: Path | str,
+    project_classes: list[str] | None = None,
+) -> list[ImageAnnotation]:
+    """Record-importer adapter (registry shape: ``(source, project_classes)``).
+
+    labelme JSONs carry their own class names, so ``project_classes`` is
+    ignored — the parameter exists only to satisfy the unified record-importer
+    shape dispatched by ``ImportRegistry.import_records``.
+    """
+    return import_labelme(input_dir)

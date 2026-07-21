@@ -324,3 +324,82 @@ class TestYoloPoseImport:
         assert len(ann.keypoints) == 2
         assert ann.keypoints[0].label == "nose"
         assert ann.keypoints[0].visible == 2
+
+
+class TestImportYoloForProject:
+    """Record-importer adapter: the four-location external-metadata pre-check.
+
+    "External metadata wins": data.yaml / classes.txt in the source dir or its
+    parent must make the adapter ignore project_classes. These four probe
+    locations moved verbatim from the controller's old importer switch — this
+    class pins them individually.
+    """
+
+    def _write_labels(self, labels_dir):
+        labels_dir.mkdir(parents=True, exist_ok=True)
+        (labels_dir / "img_001.txt").write_text(
+            "0 0.5 0.5 0.1 0.1\n1 0.2 0.2 0.1 0.1\n", encoding="utf-8",
+        )
+
+    def _class_names(self, imported):
+        return [ann.class_name for ann in imported[0].annotations]
+
+    def test_data_yaml_in_source_dir_wins(self, tmp_path):
+        from src.core.formats.yolo import import_yolo_for_project
+
+        labels_dir = tmp_path / "yolo"
+        self._write_labels(labels_dir)
+        (labels_dir / "data.yaml").write_text(
+            yaml.safe_dump({"names": ["ext_a", "ext_b"], "nc": 2}), encoding="utf-8",
+        )
+
+        imported = import_yolo_for_project(labels_dir, ["person", "bicycle"])
+
+        assert self._class_names(imported) == ["ext_a", "ext_b"]
+
+    def test_data_yaml_in_parent_dir_wins(self, tmp_path):
+        from src.core.formats.yolo import import_yolo_for_project
+
+        labels_dir = tmp_path / "dataset" / "labels"
+        self._write_labels(labels_dir)
+        (tmp_path / "dataset" / "data.yaml").write_text(
+            yaml.safe_dump({"names": ["ext_a", "ext_b"], "nc": 2}), encoding="utf-8",
+        )
+
+        imported = import_yolo_for_project(labels_dir, ["person", "bicycle"])
+
+        assert self._class_names(imported) == ["ext_a", "ext_b"]
+
+    def test_classes_txt_in_source_dir_wins(self, tmp_path):
+        from src.core.formats.yolo import import_yolo_for_project
+
+        labels_dir = tmp_path / "yolo"
+        self._write_labels(labels_dir)
+        (labels_dir / "classes.txt").write_text("ext_a\next_b\n", encoding="utf-8")
+
+        imported = import_yolo_for_project(labels_dir, ["person", "bicycle"])
+
+        assert self._class_names(imported) == ["ext_a", "ext_b"]
+
+    def test_classes_txt_in_parent_dir_wins(self, tmp_path):
+        from src.core.formats.yolo import import_yolo_for_project
+
+        labels_dir = tmp_path / "dataset" / "labels"
+        self._write_labels(labels_dir)
+        (tmp_path / "dataset" / "classes.txt").write_text(
+            "ext_a\next_b\n", encoding="utf-8",
+        )
+
+        imported = import_yolo_for_project(labels_dir, ["person", "bicycle"])
+
+        assert self._class_names(imported) == ["ext_a", "ext_b"]
+
+    def test_no_external_metadata_uses_project_classes(self, tmp_path):
+        from src.core.formats.yolo import import_yolo_for_project
+
+        labels_dir = tmp_path / "yolo"
+        self._write_labels(labels_dir)
+
+        imported = import_yolo_for_project(labels_dir, ["person", "bicycle"])
+
+        assert self._class_names(imported) == ["person", "bicycle"]

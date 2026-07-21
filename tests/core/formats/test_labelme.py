@@ -349,3 +349,26 @@ class TestLabelmeImagePathNormalization:
         results = import_labelme(tmp_path)
         from pathlib import Path as _Path
         assert _Path(results[0].image_path).stem == "foo"
+
+
+class TestImportLabelmeRecords:
+    def test_wrapper_ignores_project_classes(self, tmp_path):
+        """Record-importer adapter: labelme carries its own class names, so the
+        unified-shape project_classes argument must have no effect."""
+        from src.core.formats.labelme import import_labelme_records
+
+        labelme_data = {
+            "imagePath": "img_001.jpg",
+            "imageWidth": 640,
+            "imageHeight": 480,
+            "shapes": [
+                {"label": "person", "shape_type": "rectangle",
+                 "points": [[100, 50], [300, 250]], "flags": {}},
+            ],
+        }
+        (tmp_path / "img_001.json").write_text(json.dumps(labelme_data))
+
+        imported = import_labelme_records(tmp_path, ["completely", "unrelated"])
+
+        assert len(imported) == 1
+        assert imported[0].annotations[0].class_name == "person"

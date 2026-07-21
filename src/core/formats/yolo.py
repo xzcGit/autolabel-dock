@@ -321,6 +321,36 @@ def import_yolo_auto(
         return import_yolo_detection(labels_dir, classes)
 
 
+def import_yolo_for_project(
+    source: Path | str,
+    project_classes: list[str] | None = None,
+) -> list[ImageAnnotation]:
+    """Record-importer adapter (registry shape: ``(source, project_classes)``).
+
+    "External metadata wins": when a ``data.yaml`` or ``classes.txt`` exists
+    in the source dir or its parent, ``project_classes`` is ignored so
+    ``import_yolo_auto`` discovers the class names itself. This pre-check
+    decides *whether to pass* project classes and must probe exactly these
+    four locations (moved verbatim from the controller) — do NOT replace it
+    with ``_find_data_yaml``/``_find_classes_txt``, whose search scope serves
+    the auto-discovery fallback, not this decision.
+    """
+    p = Path(source)
+    has_external_metadata = any(
+        candidate.exists()
+        for candidate in [
+            p / "data.yaml",
+            p.parent / "data.yaml",
+            p / "classes.txt",
+            p.parent / "classes.txt",
+        ]
+    )
+    return import_yolo_auto(
+        p,
+        classes=None if has_external_metadata else project_classes,
+    )
+
+
 def _infer_classes_from_files(labels_dir: Path) -> list[str]:
     """Scan all txt files to find max class_id and generate numeric class names."""
     max_id = -1

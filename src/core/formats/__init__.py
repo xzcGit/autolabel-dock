@@ -28,7 +28,16 @@ class ExporterInfo:
 
 
 class ImporterInfo:
-    """Metadata for a registered importer."""
+    """Metadata for a registered importer.
+
+    Two honest importer kinds, selected by ``is_full_import``:
+    - record importer (default): ``import_fn(source: Path,
+      project_classes: list[str] | None) -> list[ImageAnnotation]``,
+      dispatched via ``ImportRegistry.import_records`` and fed into the
+      merge pipeline (``import_merge.merge_imported_records``);
+    - full importer: ``import_fn(source: Path, project) -> dict`` manages
+      images + labels itself (caller invokes ``info.import_fn`` directly).
+    """
 
     def __init__(
         self,
@@ -132,6 +141,32 @@ class ImportRegistry:
     def list_info(self) -> list[ImporterInfo]:
         return list(self._importers.values())
 
+    def import_records(
+        self,
+        name: str,
+        source: Path | str,
+        project_classes: list[str] | None = None,
+    ) -> list[ImageAnnotation]:
+        """Dispatch a record-importer (mirror of ``ExportRegistry.export``).
+
+        The registered ``import_fn`` IS the function called here — no
+        side-table of per-format call conventions. Raises ``ValueError`` on
+        an unknown format or when the format is a full importer
+        (``is_full_import=True``; call ``info.import_fn(source, project)``
+        for those instead).
+        """
+        info = self._importers.get(name)
+        if info is None:
+            raise ValueError(f"未知的导入格式: {name}")
+        if info.is_full_import:
+            raise ValueError(
+                f"格式 {name} 是完整导入器（is_full_import），"
+                "应通过 info.import_fn(source, project) 调用"
+            )
+        # Single normalization point: adapters always receive a non-empty
+        # class list or None (empty list means "no project classes").
+        return info.import_fn(Path(source), project_classes or None)
+
 
 # Global registry instances
 _registry = ExportRegistry()
@@ -150,9 +185,9 @@ def get_import_registry() -> ImportRegistry:
 
 def _register_builtin_formats() -> None:
     """Register all built-in export and import formats."""
-    from src.core.formats.yolo import export_yolo_detection, import_yolo_detection
+    from src.core.formats.yolo import export_yolo_detection, import_yolo_for_project
     from src.core.formats.coco import export_coco, import_coco
-    from src.core.formats.labelme import export_labelme, import_labelme
+    from src.core.formats.labelme import export_labelme, import_labelme_records
     from src.core.formats.imagefolder import (
         ImageFolderImporter,
         export_imagefolder,
@@ -171,8 +206,10 @@ def _register_builtin_formats() -> None:
         needs_classes=False, needs_source_dir=True,
     )
 
+    # Record importers: the registered import_fn is exactly what
+    # ImportRegistry.import_records calls at runtime.
     _import_registry.register(
-        "YOLO", "YOLO (txt)", import_yolo_detection,
+        "YOLO", "YOLO (txt)", import_yolo_for_project,
         input_is_file=False,
     )
     _import_registry.register(
@@ -180,13 +217,15 @@ def _register_builtin_formats() -> None:
         input_is_file=True, file_filter="JSON 文件 (*.json)",
     )
     _import_registry.register(
-        "labelme", "labelme (json)", import_labelme,
+        "labelme", "labelme (json)", import_labelme_records,
         input_is_file=False,
     )
     _import_registry.register(
         "ImageFolder", "ImageFolder (分类)", ImageFolderImporter().import_to_project,
         input_is_file=False, is_full_import=True,
     )
+    # CSV is export-only by design: no importer is registered on purpose
+    # (a CSV importer would be a new feature, not a missing registration).
 
 
 _register_builtin_formats()
