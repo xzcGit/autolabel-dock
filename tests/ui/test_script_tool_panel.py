@@ -20,7 +20,8 @@ def _wait_until(predicate, timeout: float = 5.0) -> bool:
 
 class TestScriptToolPanel:
     def test_creates_and_initializes_builtin_tool(self, qapp, tmp_path):
-        from src.ui.script_tool_panel import ScriptToolPanel, _BUILTIN_CROP_FILENAME
+        from src.core.script_tools import BUILTIN_CROP_FILENAME
+        from src.ui.script_tool_panel import ScriptToolPanel
 
         tools_dir = tmp_path / "tools"
         panel = ScriptToolPanel(tools_dir=tools_dir)
@@ -31,16 +32,17 @@ class TestScriptToolPanel:
         assert panel._btn_stop is not None
         assert panel._btn_add_tool is not None
         assert panel._save_state_label.text() == "状态: 已保存"
-        assert (tools_dir / _BUILTIN_CROP_FILENAME).exists()
+        assert (tools_dir / BUILTIN_CROP_FILENAME).exists()
         assert len(panel._tool_buttons) >= 1
 
     def test_builtin_crop_tool_can_load_and_edit(self, qapp, tmp_path):
-        from src.ui.script_tool_panel import ScriptToolPanel, _BUILTIN_CROP_FILENAME
+        from src.core.script_tools import BUILTIN_CROP_FILENAME
+        from src.ui.script_tool_panel import ScriptToolPanel
 
         tools_dir = tmp_path / "tools"
         panel = ScriptToolPanel(tools_dir=tools_dir)
 
-        crop_path = tools_dir / _BUILTIN_CROP_FILENAME
+        crop_path = tools_dir / BUILTIN_CROP_FILENAME
         panel._on_tool_button_clicked(crop_path)
 
         script = panel._editor.toPlainText()
@@ -146,8 +148,30 @@ class TestScriptToolPanel:
 
         panel._on_run_clicked()
 
-        assert panel._process is not None
-        assert _wait_until(lambda: panel._process is None)
+        assert panel._runner.is_running
+        assert _wait_until(lambda: not panel._runner.is_running)
         output = panel._output.toPlainText()
         assert "hello script panel" in output
         assert "退出码: 0" in output
+
+    def test_failed_start_renders_message_and_stays_idle(self, qapp, tmp_path):
+        from src.controllers.script_tools import ScriptRunner
+        from src.ui.script_tool_panel import ScriptToolPanel
+
+        runner = ScriptRunner(program="/nonexistent/interpreter-xyz")
+        panel = ScriptToolPanel(tools_dir=tmp_path / "tools", runner=runner)
+        statuses = []
+        panel.status_changed.connect(statuses.append)
+        panel._editor.setPlainText("print('never runs')")
+
+        panel._on_run_clicked()
+
+        assert not panel._runner.is_running
+        output = panel._output.toPlainText()
+        assert "开始执行脚本" in output
+        assert "脚本启动失败" in output
+        # single report — FailedToStart is deduped in the runner
+        assert "进程错误" not in output
+        assert statuses[-1] == "脚本启动失败"
+        assert panel._btn_run.isEnabled()
+        assert not panel._btn_stop.isEnabled()

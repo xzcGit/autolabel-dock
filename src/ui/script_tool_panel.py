@@ -1,13 +1,18 @@
-"""Script tool panel — editable Python script runner with live output."""
+"""Script tool panel — editable Python script runner view with live output.
+
+Pure view: tool-file CRUD delegates to ``core.script_tools.ToolRepository``
+and the process lifecycle to ``controllers.script_tools.ScriptRunner``. The
+panel keeps only UI construction, dirty/unsaved-confirm flow, running-state
+visuals and output presentation (timestamp lines, separators, ``[系统]``
+prefixes — the runner emits data only).
+"""
 from __future__ import annotations
 
-import os
 import sys
-import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from PyQt5.QtCore import QProcess, pyqtSignal
+from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtGui import QFontDatabase, QKeySequence, QTextCursor
 from PyQt5.QtWidgets import (
     QWidget,
@@ -23,208 +28,10 @@ from PyQt5.QtWidgets import (
     QInputDialog,
 )
 
+from src.controllers.script_tools import ScriptRunner
 from src.core.config import AppConfig
+from src.core.script_tools import ToolRepository
 from src.ui.theme import set_button_role, text_style
-
-_DEFAULT_SCRIPT = """# 在这里编写你的 Python 脚本\nprint('Hello AutoLabel!')\n"""
-_DEFAULT_TOOLS_DIR = Path.home() / ".autolabel" / "tools"
-_BUILTIN_CROP_FILENAME = "内置_按标注框裁剪图片.py"
-
-_CROP_BY_BBOX_SCRIPT = '''"""按标注框裁剪图片（AutoLabel Dock 内置脚本）
-
-使用方式:
-1) 将工作目录设置为项目根目录（包含 project.json）
-2) 直接运行本脚本
-3) 结果默认输出到项目目录下 crops/
-"""
-from __future__ import annotations
-
-import json
-from pathlib import Path
-
-from PIL import Image
-
-PROJECT_DIR = Path(".")
-OUTPUT_DIR = PROJECT_DIR / "crops"
-ONLY_CONFIRMED = False
-KEEP_CLASS_SUBDIR = True
-LIST_LIMIT = 20
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"}
-
-
-def bbox_to_xyxy(bbox: list[float] | tuple[float, float, float, float], width: int, height: int) -> tuple[int, int, int, int]:
-    """Convert normalized (cx, cy, w, h) to pixel box (x1, y1, x2, y2)."""
-    cx, cy, bw, bh = bbox
-    x1 = int((cx - bw / 2.0) * width)
-    y1 = int((cy - bh / 2.0) * height)
-    x2 = int((cx + bw / 2.0) * width)
-    y2 = int((cy + bh / 2.0) * height)
-    x1 = max(0, min(width - 1, x1))
-    y1 = max(0, min(height - 1, y1))
-    x2 = max(1, min(width, x2))
-    y2 = max(1, min(height, y2))
-    return x1, y1, x2, y2
-
-
-def collect_images(image_dir: Path) -> list[Path]:
-    return sorted(p for p in image_dir.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS)
-
-
-def resolve_image_for_json(
-    label_file: Path,
-    doc: dict,
-    image_by_name: dict[str, Path],
-    images_by_stem: dict[str, list[Path]],
-) -> tuple[Path | None, str]:
-    declared = str(doc.get("image_path", "")).strip()
-    if declared:
-        declared_name = Path(declared).name
-        if declared_name in image_by_name:
-            return image_by_name[declared_name], ""
-
-    stem = Path(declared).stem if declared else label_file.stem
-    candidates = images_by_stem.get(stem, [])
-    if len(candidates) == 1:
-        return candidates[0], ""
-    if len(candidates) > 1:
-        return None, f"同名 stem 对应多张图片: {stem}"
-    return None, "没有匹配到图片"
-
-
-def print_preview(title: str, rows: list[str]) -> None:
-    print(f"{title}: {len(rows)}")
-    for row in rows[:LIST_LIMIT]:
-        print(f"  - {row}")
-    if len(rows) > LIST_LIMIT:
-        print(f"  ... 其余 {len(rows) - LIST_LIMIT} 条省略")
-
-
-def main() -> None:
-    project_json = PROJECT_DIR / "project.json"
-    if not project_json.exists():
-        print("未找到 project.json，请将工作目录切到项目根目录")
-        return
-
-    try:
-        config = json.loads(project_json.read_text(encoding="utf-8"))
-    except Exception as exc:
-        print(f"project.json 读取失败: {exc}")
-        return
-
-    image_dir = Path(config.get("image_dir", "images"))
-    if not image_dir.is_absolute():
-        image_dir = PROJECT_DIR / image_dir
-
-    label_dir = Path(config.get("label_dir", "labels"))
-    if not label_dir.is_absolute():
-        label_dir = PROJECT_DIR / label_dir
-
-    if not image_dir.exists():
-        print(f"图片目录不存在: {image_dir}")
-        return
-    if not label_dir.exists():
-        print(f"标签目录不存在: {label_dir}")
-        return
-
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    images = collect_images(image_dir)
-    image_by_name = {p.name: p for p in images}
-    images_by_stem: dict[str, list[Path]] = {}
-    for image_path in images:
-        images_by_stem.setdefault(image_path.stem, []).append(image_path)
-
-    label_files = sorted(label_dir.glob("*.json"))
-
-    print(f"图片数量: {len(images)}")
-    print(f"标签文件数量: {len(label_files)}")
-    print(f"图片目录: {image_dir}")
-    print(f"输出目录: {OUTPUT_DIR}")
-
-    broken_json: list[str] = []
-    unmatched_json: list[str] = []
-    matched_records: list[tuple[Path, Path, dict]] = []
-    matched_image_paths: set[Path] = set()
-
-    for label_file in label_files:
-        try:
-            doc = json.loads(label_file.read_text(encoding="utf-8"))
-        except Exception as exc:
-            broken_json.append(f"{label_file.name} | 解析失败: {exc}")
-            continue
-
-        image_path, reason = resolve_image_for_json(label_file, doc, image_by_name, images_by_stem)
-        if image_path is None:
-            unmatched_json.append(f"{label_file.name} | {reason}")
-            continue
-
-        matched_records.append((label_file, image_path, doc))
-        matched_image_paths.add(image_path)
-
-    unmatched_images = [p.name for p in images if p not in matched_image_paths]
-
-    saved_count = 0
-    invalid_bbox = 0
-    open_failed = 0
-    matched_without_bbox = 0
-
-    for label_file, image_path, doc in matched_records:
-        annotations = doc.get("annotations", [])
-        if not annotations:
-            matched_without_bbox += 1
-            continue
-
-        try:
-            with Image.open(image_path) as img:
-                width, height = img.size
-                for i, ann in enumerate(annotations):
-                    bbox = ann.get("bbox")
-                    if not bbox or len(bbox) != 4:
-                        continue
-                    if ONLY_CONFIRMED and not ann.get("confirmed", False):
-                        continue
-
-                    try:
-                        bbox_vals = [float(v) for v in bbox]
-                    except (TypeError, ValueError):
-                        invalid_bbox += 1
-                        continue
-
-                    x1, y1, x2, y2 = bbox_to_xyxy(bbox_vals, width, height)
-                    if x2 <= x1 or y2 <= y1:
-                        invalid_bbox += 1
-                        continue
-
-                    crop = img.crop((x1, y1, x2, y2))
-                    class_name = str(ann.get("class_name", "unknown"))
-                    out_dir = OUTPUT_DIR / class_name if KEEP_CLASS_SUBDIR else OUTPUT_DIR
-                    out_dir.mkdir(parents=True, exist_ok=True)
-                    out_name = f"{image_path.stem}_{i:03d}.jpg"
-                    crop.save(out_dir / out_name, quality=95)
-                    saved_count += 1
-        except Exception:
-            open_failed += 1
-
-    print("\\n--- 匹配统计汇总 ---")
-    print(f"匹配成功的图像-JSON对: {len(matched_records)}")
-    print(f"未匹配JSON: {len(unmatched_json)}")
-    print(f"未匹配图片: {len(unmatched_images)}")
-    print(f"损坏JSON: {len(broken_json)}")
-    print(f"匹配但无标注的JSON: {matched_without_bbox}")
-    print(f"无效标注框数量: {invalid_bbox}")
-    print(f"图片打开失败数量: {open_failed}")
-    print(f"裁剪完成: 保存 {saved_count} 个目标框")
-
-    if unmatched_json:
-        print_preview("未匹配JSON列表", unmatched_json)
-    if unmatched_images:
-        print_preview("未匹配图片列表", unmatched_images)
-    if broken_json:
-        print_preview("损坏JSON列表", broken_json)
-
-
-if __name__ == "__main__":
-    main()
-'''
 
 
 class ScriptToolPanel(QWidget):
@@ -238,15 +45,14 @@ class ScriptToolPanel(QWidget):
         config_path: Path | str | None = None,
         tools_dir: Path | str | None = None,
         parent=None,
+        *,
+        repository: ToolRepository | None = None,
+        runner: ScriptRunner | None = None,
     ):
         super().__init__(parent)
-        self._app_config = app_config
-        self._config_path = Path(config_path) if config_path else None
-        self._tools_dir = Path(tools_dir) if tools_dir else _DEFAULT_TOOLS_DIR
-        self._tools_dir.mkdir(parents=True, exist_ok=True)
+        self._repo = repository if repository is not None else ToolRepository(tools_dir)
+        self._runner = runner if runner is not None else ScriptRunner(parent=self)
 
-        self._process: QProcess | None = None
-        self._temp_script_path: Path | None = None
         self._working_dir = Path.cwd()
 
         self._current_tool_path: Path | None = None
@@ -255,8 +61,8 @@ class ScriptToolPanel(QWidget):
         self._is_dirty = False
         self._loading_script = False
 
-        self._ensure_builtin_tools()
-        self._migrate_legacy_script_tools()
+        self._repo.ensure_builtin_tools()
+        self._repo.migrate_legacy(app_config, Path(config_path) if config_path else None)
 
         self._init_ui()
         self._connect_signals()
@@ -353,43 +159,9 @@ class ScriptToolPanel(QWidget):
         self._editor.textChanged.connect(self._on_editor_text_changed)
         self._save_shortcut.activated.connect(self._on_save_shortcut)
 
-    def _ensure_builtin_tools(self) -> None:
-        crop_path = self._tools_dir / _BUILTIN_CROP_FILENAME
-        if not crop_path.exists():
-            crop_path.write_text(_CROP_BY_BBOX_SCRIPT, encoding="utf-8")
-
-    def _migrate_legacy_script_tools(self) -> None:
-        if self._app_config is None or not self._app_config.script_tools:
-            return
-
-        migrated = False
-        for name, script in self._app_config.script_tools.items():
-            if not isinstance(script, str):
-                continue
-            fname = self._filename_from_tool_name(name)
-            if not fname:
-                continue
-            path = self._tools_dir / fname
-            if path.exists():
-                continue
-            path.write_text(script, encoding="utf-8")
-            migrated = True
-
-        if migrated:
-            self._app_config.script_tools = {}
-            if self._config_path is not None:
-                self._app_config.save(self._config_path)
-
-    def _filename_from_tool_name(self, name: str) -> str:
-        cleaned = str(name).strip().replace("\n", " ").replace("\r", " ")
-        if cleaned.lower().endswith(".py"):
-            cleaned = cleaned[:-3]
-        for ch in '/\\:*?"<>|':
-            cleaned = cleaned.replace(ch, "_")
-        cleaned = cleaned.strip().strip(".")
-        if not cleaned:
-            return ""
-        return f"{cleaned}.py"
+        self._runner.output.connect(self._append_text)
+        self._runner.process_error.connect(self._on_process_error)
+        self._runner.finished.connect(self._on_script_finished)
 
     def _clear_tool_buttons(self) -> None:
         while self._tool_list_layout.count():
@@ -399,13 +171,12 @@ class ScriptToolPanel(QWidget):
                 widget.deleteLater()
 
     def _refresh_tool_buttons(self, select_path: Path | None = None) -> None:
-        self._tool_files = sorted(self._tools_dir.glob("*.py"), key=lambda p: p.name.lower())
+        self._tool_files = self._repo.list_tools()
         self._clear_tool_buttons()
         self._tool_buttons = {}
 
         if not self._tool_files:
-            default_path = self._tools_dir / "新建工具.py"
-            default_path.write_text(_DEFAULT_SCRIPT, encoding="utf-8")
+            default_path = self._repo.create_tool("新建工具")
             self._tool_files = [default_path]
 
         for tool_path in self._tool_files:
@@ -452,7 +223,7 @@ class ScriptToolPanel(QWidget):
 
     def _load_tool(self, tool_path: Path) -> None:
         try:
-            script = tool_path.read_text(encoding="utf-8")
+            script = self._repo.load_tool(tool_path)
         except OSError as exc:
             QMessageBox.warning(self, "读取失败", f"无法读取脚本: {tool_path.name}\n{exc}")
             return
@@ -499,7 +270,7 @@ class ScriptToolPanel(QWidget):
         self._load_tool(tool_path)
 
     def _on_add_tool_clicked(self) -> None:
-        if self._process is not None:
+        if self._runner.is_running:
             QMessageBox.information(self, "提示", "脚本执行中，停止后再添加工具")
             return
 
@@ -510,18 +281,17 @@ class ScriptToolPanel(QWidget):
         if not ok:
             return
 
-        filename = self._filename_from_tool_name(name)
-        if not filename:
+        existing = self._repo.find_tool(name)
+        if existing is not None:
+            QMessageBox.information(self, "工具已存在", "工具已存在，已切换到该工具")
+            self._refresh_tool_buttons(select_path=existing)
+            return
+
+        tool_path = self._repo.create_tool(name)
+        if tool_path is None:
             QMessageBox.warning(self, "名称无效", "工具名称不能为空")
             return
 
-        tool_path = self._tools_dir / filename
-        if tool_path.exists():
-            QMessageBox.information(self, "工具已存在", "工具已存在，已切换到该工具")
-            self._refresh_tool_buttons(select_path=tool_path)
-            return
-
-        tool_path.write_text(_DEFAULT_SCRIPT, encoding="utf-8")
         self._refresh_tool_buttons(select_path=tool_path)
         self.status_changed.emit(f"已添加工具: {tool_path.stem}")
 
@@ -543,7 +313,7 @@ class ScriptToolPanel(QWidget):
 
         script = self._editor.toPlainText()
         try:
-            self._current_tool_path.write_text(script, encoding="utf-8")
+            self._repo.save_tool(self._current_tool_path, script)
         except OSError as exc:
             QMessageBox.warning(self, "保存失败", f"无法保存脚本: {self._current_tool_path.name}\n{exc}")
             return False
@@ -564,7 +334,7 @@ class ScriptToolPanel(QWidget):
         self._cwd_label.setToolTip(str(self._working_dir))
 
     def _on_run_clicked(self) -> None:
-        if self._process is not None:
+        if self._runner.is_running:
             return
 
         script = self._editor.toPlainText().strip()
@@ -572,95 +342,37 @@ class ScriptToolPanel(QWidget):
             QMessageBox.warning(self, "脚本为空", "请先输入 Python 脚本内容")
             return
 
-        self._cleanup_temp_script()
-        fd, script_path = tempfile.mkstemp(prefix="autolabel_script_", suffix=".py")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(script)
-                if not script.endswith("\n"):
-                    f.write("\n")
-        except Exception:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-            Path(script_path).unlink(missing_ok=True)
-            raise
-
-        self._temp_script_path = Path(script_path)
-
-        process = QProcess(self)
-        process.setProgram(sys.executable)
-        process.setArguments(["-u", str(self._temp_script_path)])
-        process.setWorkingDirectory(str(self._working_dir))
-
-        process.readyReadStandardOutput.connect(self._on_stdout)
-        process.readyReadStandardError.connect(self._on_stderr)
-        process.errorOccurred.connect(self._on_process_error)
-        process.finished.connect(self._on_finished)
-
-        self._process = process
-        self._set_running_state(True)
+        started = self._runner.run(script, self._working_dir)
 
         self._append_line(f"[{datetime.now().strftime('%H:%M:%S')}] 开始执行脚本")
         self._append_line(f"工作目录: {self._working_dir}")
         self._append_line("-" * 50)
 
-        process.start()
-        if not process.waitForStarted(1000):
+        if not started:
             self._append_line("脚本启动失败")
             self._set_running_state(False)
-            process.deleteLater()
-            self._process = None
-            self._cleanup_temp_script()
             self.status_changed.emit("脚本启动失败")
             return
+
+        self._set_running_state(True)
         self.status_changed.emit("脚本执行中...")
 
     def stop_script(self) -> None:
         """Stop currently running script if needed."""
-        if self._process is None:
+        if not self._runner.is_running:
             return
 
         self._append_line("\n[系统] 正在停止脚本...")
-        self._process.terminate()
-        if not self._process.waitForFinished(1500):
-            self._process.kill()
-            self._process.waitForFinished(1000)
+        self._runner.stop()
 
-    def _on_stdout(self) -> None:
-        if self._process is None:
-            return
-        data = bytes(self._process.readAllStandardOutput())
-        self._append_text(data.decode("utf-8", errors="replace"))
+    def _on_process_error(self, error_name: str) -> None:
+        self._append_line(f"\n[系统] 进程错误: {error_name}")
 
-    def _on_stderr(self) -> None:
-        if self._process is None:
-            return
-        data = bytes(self._process.readAllStandardError())
-        self._append_text(data.decode("utf-8", errors="replace"))
-
-    def _on_process_error(self, error: QProcess.ProcessError) -> None:
-        error_names = {
-            QProcess.FailedToStart: "启动失败",
-            QProcess.Crashed: "进程崩溃",
-            QProcess.Timedout: "超时",
-            QProcess.WriteError: "写入错误",
-            QProcess.ReadError: "读取错误",
-            QProcess.UnknownError: "未知错误",
-        }
-        self._append_line(f"\n[系统] 进程错误: {error_names.get(error, str(int(error)))}")
-
-    def _on_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
-        status = "正常退出" if exit_status == QProcess.NormalExit else "异常终止"
+    def _on_script_finished(self, exit_code: int, normal_exit: bool) -> None:
+        status = "正常退出" if normal_exit else "异常终止"
         self._append_line(f"\n[系统] 脚本结束: {status} | 退出码: {exit_code}")
 
-        if self._process is not None:
-            self._process.deleteLater()
-            self._process = None
-
         self._set_running_state(False)
-        self._cleanup_temp_script()
         self.status_changed.emit(f"脚本执行完成 (退出码: {exit_code})")
 
     def _set_running_state(self, running: bool) -> None:
@@ -682,17 +394,9 @@ class ScriptToolPanel(QWidget):
         self._output.appendPlainText(text)
         self._output.moveCursor(QTextCursor.End)
 
-    def _cleanup_temp_script(self) -> None:
-        if self._temp_script_path is None:
-            return
-        try:
-            self._temp_script_path.unlink(missing_ok=True)
-        finally:
-            self._temp_script_path = None
-
     def prepare_close(self) -> bool:
         """Handle save/cancel flow before app close. Return True if close can continue."""
-        if self._process is not None:
+        if self._runner.is_running:
             self.stop_script()
         return self._maybe_resolve_unsaved()
 
@@ -700,5 +404,5 @@ class ScriptToolPanel(QWidget):
         if not self.prepare_close():
             event.ignore()
             return
-        self._cleanup_temp_script()
+        self._runner.cleanup_temp()
         super().closeEvent(event)
