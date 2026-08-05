@@ -1,4 +1,5 @@
 """Tests for YOLO format import/export."""
+import pytest
 import yaml
 
 from src.core.annotation import Annotation, ImageAnnotation, Keypoint
@@ -7,6 +8,9 @@ from src.core.formats.yolo import (
     import_yolo_detection,
     export_yolo_pose,
     import_yolo_pose,
+    export_yolo_segment,
+    import_yolo_segment,
+    _detect_yolo_format,
 )
 
 
@@ -403,3 +407,251 @@ class TestImportYoloForProject:
         imported = import_yolo_for_project(labels_dir, ["person", "bicycle"])
 
         assert self._class_names(imported) == ["person", "bicycle"]
+
+
+class TestYoloSegmentExport:
+    def test_export_polygon_row_has_no_bbox_fields(self, tmp_path):
+        ia = ImageAnnotation(
+            image_path="seg.jpg",
+            image_size=(640, 480),
+            annotations=[
+                Annotation(
+                    class_name="leaf", class_id=0,
+                    bbox=(0.5, 0.5, 0.4, 0.4),
+                    polygon=[[0.3, 0.3], [0.7, 0.3], [0.5, 0.7]],
+                    confirmed=True,
+                ),
+            ],
+        )
+        export_yolo_segment([ia], tmp_path / "out", classes=["leaf"])
+        line = (tmp_path / "out" / "labels" / "seg.txt").read_text().strip()
+        parts = line.split()
+        # class + 3 points * 2 = 7 fields, NO 4-field bbox prefix
+        assert len(parts) == 7
+        assert parts[0] == "0"
+        assert parts[1:] == ["0.300000", "0.300000", "0.700000", "0.300000", "0.500000", "0.700000"]
+
+    def test_export_generates_data_yaml(self, tmp_path):
+        ia = ImageAnnotation(
+            image_path="seg.jpg",
+            image_size=(640, 480),
+            annotations=[
+                Annotation(
+                    class_name="leaf", class_id=0,
+                    polygon=[[0.3, 0.3], [0.7, 0.3], [0.5, 0.7]],
+                    confirmed=True,
+                ),
+            ],
+        )
+        export_yolo_segment([ia], tmp_path / "out", classes=["leaf", "stem"])
+        data = yaml.safe_load((tmp_path / "out" / "data.yaml").read_text())
+        assert data["names"] == ["leaf"]
+        assert data["nc"] == 1
+
+    def test_export_folds_bbox_only_annotation_to_polygon(self, tmp_path):
+        ia = ImageAnnotation(
+            image_path="seg.jpg",
+            image_size=(640, 480),
+            annotations=[
+                Annotation(
+                    class_name="leaf", class_id=0,
+                    bbox=(0.5, 0.5, 0.4, 0.2),  # no polygon
+                    confirmed=True,
+                ),
+            ],
+        )
+        export_yolo_segment([ia], tmp_path / "out", classes=["leaf"])
+        parts = (tmp_path / "out" / "labels" / "seg.txt").read_text().strip().split()
+        # class + 4 corners * 2 = 9 fields
+        assert len(parts) == 9
+
+    def test_export_only_confirmed(self, tmp_path):
+        ia = ImageAnnotation(
+            image_path="seg.jpg",
+            image_size=(640, 480),
+            annotations=[
+                Annotation(class_name="leaf", class_id=0,
+                           polygon=[[0.3, 0.3], [0.7, 0.3], [0.5, 0.7]], confirmed=True),
+                Annotation(class_name="leaf", class_id=0,
+                           polygon=[[0.1, 0.1], [0.2, 0.1], [0.15, 0.2]],
+                           confirmed=False, source="auto", confidence=0.7),
+            ],
+        )
+        export_yolo_segment([ia], tmp_path / "out", classes=["leaf"], only_confirmed=True)
+        lines = (tmp_path / "out" / "labels" / "seg.txt").read_text().strip().splitlines()
+        assert len(lines) == 1
+
+
+class TestYoloSegmentImport:
+    def test_import_polygon(self, tmp_path):
+        labels_dir = tmp_path / "labels"
+        labels_dir.mkdir()
+        (labels_dir / "seg.txt").write_text("0 0.3 0.3 0.7 0.3 0.5 0.7\n")
+        results = import_yolo_segment(labels_dir, classes=["leaf"])
+        assert len(results) == 1
+        ann = results[0].annotations[0]
+        assert ann.class_name == "leaf"
+        assert ann.polygon == [[0.3, 0.3], [0.7, 0.3], [0.5, 0.7]]
+        # Derived bbox: x∈[0.3,0.7], y∈[0.3,0.7] → center (0.5,0.5), 0.4×0.4
+        cx, cy, w, h = ann.bbox
+        assert cx == pytest.approx(0.5)
+        assert cy == pytest.approx(0.5)
+        assert w == pytest.approx(0.4)
+        assert h == pytest.approx(0.4)
+        assert ann.confirmed is True
+        assert ann.source == "manual"
+
+    def test_roundtrip_export_import(self, tmp_path):
+        poly = [[0.2, 0.2], [0.8, 0.2], [0.8, 0.8], [0.2, 0.8]]
+        ia = ImageAnnotation(
+            image_path="seg.jpg",
+            image_size=(640, 480),
+            annotations=[
+                Annotation(class_name="leaf", class_id=0, polygon=poly, confirmed=True),
+            ],
+        )
+        export_yolo_segment([ia], tmp_path / "out", classes=["leaf"])
+        imported = import_yolo_segment(tmp_path / "out" / "labels", classes=["leaf"])
+        assert imported[0].annotations[0].polygon == poly
+
+    def test_import_rejects_too_few_points(self, tmp_path):
+        labels_dir = tmp_path / "labels"
+        labels_dir.mkdir()
+        (labels_dir / "seg.txt").write_text("0 0.3 0.3 0.7 0.3\n")  # only 2 points
+        with pytest.raises(ValueError):
+            import_yolo_segment(labels_dir, classes=["leaf"])
+
+
+class TestDetectYoloFormat:
+    """_detect_yolo_format distinguishes detection / pose / segment."""
+
+    def test_detects_detection(self, tmp_path):
+        labels_dir = tmp_path / "labels"
+        labels_dir.mkdir()
+        (labels_dir / "a.txt").write_text("0 0.5 0.5 0.3 0.3\n1 0.2 0.2 0.1 0.1\n")
+        assert _detect_yolo_format(labels_dir) == ("detection", 0)
+
+    def test_detects_pose_fixed_length(self, tmp_path):
+        labels_dir = tmp_path / "labels"
+        labels_dir.mkdir()
+        # 5 bbox + 2 kpts * 3 = 11 fields, uniform across rows
+        (labels_dir / "a.txt").write_text(
+            "0 0.5 0.5 0.3 0.6 0.45 0.3 2 0.50 0.35 1\n"
+            "0 0.4 0.4 0.2 0.4 0.35 0.2 2 0.40 0.25 1\n"
+        )
+        fmt, num_kpts = _detect_yolo_format(labels_dir)
+        assert fmt == "pose"
+        assert num_kpts == 2
+
+    def test_detects_segment_variable_length(self, tmp_path):
+        """The old code mis-classified variable-length polygon rows as pose;
+        variable row lengths (all > 5 fields) must resolve to segment."""
+        labels_dir = tmp_path / "labels"
+        labels_dir.mkdir()
+        (labels_dir / "a.txt").write_text(
+            "0 0.3 0.3 0.7 0.3 0.5 0.7\n"                 # 3 points (7 fields)
+            "0 0.1 0.1 0.2 0.1 0.2 0.2 0.15 0.25 0.1 0.2\n"  # 5 points (11 fields)
+        )
+        assert _detect_yolo_format(labels_dir) == ("segment", 0)
+
+    def test_auto_import_dispatches_segment(self, tmp_path):
+        from src.core.formats.yolo import import_yolo_auto
+        labels_dir = tmp_path / "labels"
+        labels_dir.mkdir()
+        (labels_dir / "a.txt").write_text(
+            "0 0.3 0.3 0.7 0.3 0.5 0.7\n"
+            "0 0.1 0.1 0.2 0.1 0.2 0.2 0.15 0.25\n"
+        )
+        results = import_yolo_auto(labels_dir, classes=["leaf"])
+        # Both rows became polygons, none parsed as pose/bbox
+        anns = results[0].annotations
+        assert all(a.polygon is not None for a in anns)
+        assert len(anns[0].polygon) == 3
+        assert len(anns[1].polygon) == 4
+
+    def test_uniform_rows_without_data_yaml_keep_pose_heuristic(self, tmp_path):
+        """Regression pin: a bare pose labels dir (no data.yaml) with uniform
+        5+3k rows must keep importing as pose — the segment additions may not
+        change the legacy heuristic for metadata-less dirs."""
+        labels_dir = tmp_path / "labels"
+        labels_dir.mkdir()
+        (labels_dir / "a.txt").write_text(
+            "0 0.5 0.5 0.3 0.6 0.45 0.3 2 0.50 0.35 1\n"
+        )
+        assert _detect_yolo_format(labels_dir) == ("pose", 2)
+
+    def test_kpt_shape_in_data_yaml_is_authoritative_pose_signal(self, tmp_path):
+        """Uniform 11-field rows are ambiguous (pose 2×dim3 / pose 3×dim2 /
+        3-point polygons). kpt_shape settles it — including the keypoint count
+        the %3-first heuristic would get wrong for dim-2 datasets."""
+        labels_dir = tmp_path / "labels"
+        labels_dir.mkdir()
+        # 5 bbox + 3 kpts * 2 dims = 11 fields (the %3 heuristic guesses 2×dim3)
+        (labels_dir / "a.txt").write_text(
+            "0 0.5 0.5 0.3 0.6 0.45 0.3 0.50 0.35 0.40 0.30\n"
+        )
+        assert _detect_yolo_format(labels_dir, kpt_shape=(3, 2)) == ("pose", 3)
+
+    def test_uniform_polygon_rows_with_plain_data_yaml_detect_as_segment(self, tmp_path):
+        """A data.yaml WITHOUT kpt_shape next to uniform >5-field rows means
+        segment: a trainable pose data.yaml must declare kpt_shape, and this is
+        exactly the shape of our own YOLO-seg export when every polygon shares
+        one vertex count (e.g. all bbox-folded rectangles)."""
+        labels_dir = tmp_path / "labels"
+        labels_dir.mkdir()
+        (labels_dir / "a.txt").write_text("0 0.3 0.4 0.7 0.4 0.7 0.6 0.3 0.6\n")
+        assert _detect_yolo_format(
+            labels_dir, kpt_shape=None, has_data_yaml=True,
+        ) == ("segment", 0)
+
+    def test_auto_import_kpt_shape_drives_dim2_pose_parse(self, tmp_path):
+        from src.core.formats.yolo import import_yolo_auto
+        labels_dir = tmp_path / "labels"
+        labels_dir.mkdir()
+        # 5 bbox + 3 kpts * 2 dims = 11 fields, no visibility column.
+        (labels_dir / "a.txt").write_text(
+            "0 0.5 0.5 0.3 0.6 0.45 0.30 0.50 0.35 0.40 0.30\n"
+        )
+        (labels_dir / "data.yaml").write_text(
+            yaml.dump({"names": ["person"], "nc": 1, "kpt_shape": [3, 2]})
+        )
+        results = import_yolo_auto(labels_dir)
+        ann = results[0].annotations[0]
+        assert ann.polygon is None
+        assert len(ann.keypoints) == 3
+        assert ann.keypoints[0].x == pytest.approx(0.45)
+        assert ann.keypoints[0].y == pytest.approx(0.30)
+        # dim-2 rows carry no visibility → default visible.
+        assert all(kp.visible == 2 for kp in ann.keypoints)
+
+    def test_own_uniform_rectangle_export_reimports_as_segment(self, tmp_path):
+        """Round-trip acceptance: a segment export where EVERY annotation is a
+        folded bbox (uniform 9-field rows — e.g. a project auto-labeled with a
+        detect model) must come back as polygons via the auto importer, not be
+        mis-parsed as pose."""
+        from src.core.formats.yolo import import_yolo_for_project
+
+        ia = ImageAnnotation(
+            image_path="seg.jpg",
+            image_size=(640, 480),
+            annotations=[
+                Annotation(class_name="leaf", class_id=0,
+                           bbox=(0.5, 0.5, 0.4, 0.2), confirmed=True),
+                Annotation(class_name="leaf", class_id=0,
+                           bbox=(0.2, 0.2, 0.1, 0.1), confirmed=True),
+            ],
+        )
+        export_dir = tmp_path / "out"
+        export_yolo_segment([ia], export_dir, classes=["leaf"])
+
+        imported = import_yolo_for_project(export_dir / "labels")
+        anns = imported[0].annotations
+        assert len(anns) == 2
+        for ann in anns:
+            assert ann.polygon is not None
+            assert len(ann.polygon) == 4  # the folded 4-corner rectangle
+        cx, cy, w, h = anns[0].bbox
+        assert cx == pytest.approx(0.5)
+        assert cy == pytest.approx(0.5)
+        assert w == pytest.approx(0.4)
+        assert h == pytest.approx(0.2)

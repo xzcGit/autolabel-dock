@@ -77,3 +77,22 @@ def test_create_classify_project(tmp_path):
     assert config_path.exists()
     data = json.loads(config_path.read_text())
     assert data["task_type"] == "classify"
+
+
+def test_create_segment_project(tmp_path):
+    """ProjectManager.create should support the segment task_type."""
+    project_dir = tmp_path / "segment_project"
+    pm = ProjectManager.create(
+        project_dir=project_dir,
+        name="Segment Test",
+        classes=["leaf", "stem"],
+        task_type="segment",
+    )
+    assert pm.config.task_type == "segment"
+
+    data = json.loads((project_dir / "project.json").read_text())
+    assert data["task_type"] == "segment"
+
+    # Roundtrip through open()
+    reopened = ProjectManager.open(project_dir)
+    assert reopened.config.task_type == "segment"

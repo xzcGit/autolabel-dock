@@ -1167,3 +1167,181 @@ class TestTrainPanelSealedSeam:
             assert kwargs["tag_filter"].is_empty()
         finally:
             win.close()
+
+
+class TestVideoImportWiring:
+    """MainWindow shell for the video-frame-import flow: the two entry points
+    (文件 menu action, file-list video drop → pre-filled dialog), image-dir
+    resolution, and the progress-dialog choreography ending in a rescan.
+    Extraction itself is covered in tests/controllers/test_video_import_controller.py.
+    """
+
+    def test_file_menu_has_video_import_action_in_import_group(self, qapp, tmp_path):
+        from src.app import MainWindow
+
+        win = MainWindow(config_path=tmp_path / "config.json")
+        try:
+            file_menu = win.menuBar().actions()[0].menu()
+            texts = [a.text() for a in file_menu.actions()]
+            assert "导入视频帧..." in texts
+            # Sits in the import group, right after 导入标注...
+            assert texts.index("导入视频帧...") == texts.index("导入标注...") + 1
+        finally:
+            win.close()
+
+    def test_videos_dropped_prefills_dialog(self, qapp, tmp_path, monkeypatch):
+        """LabelPanel.videos_dropped → dialog constructed with the paths.
+
+        The handler imports VideoImportDialog lazily, so patching the module
+        attribute intercepts construction."""
+        constructed = []
+
+        class _FakeDialog:
+            def __init__(self, parent=None, *, initial_videos=None, prober=None):
+                constructed.append(list(initial_videos or []))
+
+            def exec_(self):
+                return 0  # user cancels — no import started
+
+        win = _win_with_project(tmp_path)
+        try:
+            monkeypatch.setattr(
+                "src.ui.video_import_dialog.VideoImportDialog", _FakeDialog,
+            )
+            video = tmp_path / "clip.mp4"
+            win._label_panel.videos_dropped.emit([video])
+            assert constructed == [[video]]
+        finally:
+            win.close()
+
+    def test_accepted_dialog_starts_import_into_project_image_dir(
+        self, qapp, tmp_path, monkeypatch,
+    ):
+        from src.core.video_frames import SamplingParams
+
+        params = SamplingParams(mode="interval", interval=7, max_frames=9)
+        video = tmp_path / "clip.mp4"
+
+        class _FakeDialog:
+            def __init__(self, parent=None, *, initial_videos=None, prober=None):
+                pass
+
+            def exec_(self):
+                return 1
+
+            def get_videos(self):
+                return [video]
+
+            def get_params(self):
+                return params
+
+        win = _win_with_project(tmp_path)
+        try:
+            monkeypatch.setattr(
+                "src.ui.video_import_dialog.VideoImportDialog", _FakeDialog,
+            )
+            calls = []
+            monkeypatch.setattr(
+                win._video_import_ctrl, "start_import",
+                lambda videos, out_dir, p: calls.append((videos, out_dir, p)),
+            )
+            win._on_import_video_frames()
+            # Image dir resolved with ProjectManager.list_images semantics.
+            assert calls == [([video], win._project.project_dir / "images", params)]
+        finally:
+            win.close()
+
+    def test_project_image_dir_honors_absolute_external_dir(self, qapp, tmp_path):
+        """An external absolute image_dir (ProjectManager keeps it absolute in
+        project.json) must resolve as-is, not be re-rooted under project_dir —
+        the same relative-or-absolute branch as ProjectManager.list_images."""
+        win = _win_with_project(tmp_path)
+        try:
+            external = tmp_path / "external_images"
+            external.mkdir()
+            win._project.config.image_dir = str(external)
+            assert win._project_image_dir() == external
+        finally:
+            win.close()
+
+    def test_no_project_is_silent_noop(self, qapp, tmp_path, monkeypatch):
+        from src.app import MainWindow
+
+        win = MainWindow(config_path=tmp_path / "config.json")
+        try:
+            constructed = []
+            monkeypatch.setattr(
+                "src.ui.video_import_dialog.VideoImportDialog",
+                lambda *a, **k: constructed.append(1),
+            )
+            win._on_import_video_frames()
+            assert constructed == []
+        finally:
+            win.close()
+
+    def test_progress_dialog_lifecycle_and_rescan_on_finish(self, qapp, tmp_path):
+        from PyQt5.QtCore import Qt
+        from PyQt5.QtGui import QColor, QImage
+
+        win = _win_with_project(tmp_path)
+        try:
+            win._on_video_import_started(3)
+            assert win._video_progress_dialog is not None
+            win._on_video_import_progress(1, 3)
+            win._on_video_import_detail("clip.mp4", 5, 2)
+
+            # Frames landed on disk during the run; finished must rescan the
+            # file list (F5 path) so they appear without manual refresh.
+            img = QImage(8, 8, QImage.Format_RGB32)
+            img.fill(QColor(Qt.blue))
+            img.save(
+                str(win._project.project_dir / "images" / "clip_f000000.jpg"),
+                "JPG",
+            )
+
+            win._on_video_import_finished("视频抽帧完成（已写入 1 帧，跳过 0 帧）")
+
+            assert win._video_progress_dialog is None
+            assert win._status_label.text().startswith("视频抽帧完成")
+            names = [p.name for p in win._label_panel._view.get_all_paths()]
+            assert "clip_f000000.jpg" in names
+        finally:
+            win.close()
+
+    def test_progress_dialog_cancel_routes_to_controller(self, qapp, tmp_path, monkeypatch):
+        win = _win_with_project(tmp_path)
+        try:
+            cancels = []
+            monkeypatch.setattr(
+                win._video_import_ctrl, "cancel", lambda: cancels.append(1),
+            )
+            win._on_video_import_started(2)
+            win._video_progress_dialog._on_cancel()
+            assert cancels == [1]
+            win._on_video_import_finished("视频抽帧已取消（已写入 0 帧，跳过 0 帧）")
+            assert win._video_progress_dialog is None
+        finally:
+            win.close()
+
+    def test_second_dialog_blocked_while_running(self, qapp, tmp_path, monkeypatch):
+        from PyQt5.QtWidgets import QMessageBox
+        from unittest.mock import MagicMock
+
+        win = _win_with_project(tmp_path)
+        try:
+            win._video_import_ctrl._worker = MagicMock()  # running
+            shown = []
+            monkeypatch.setattr(
+                QMessageBox, "information", lambda *a, **k: shown.append(a[-1]),
+            )
+            constructed = []
+            monkeypatch.setattr(
+                "src.ui.video_import_dialog.VideoImportDialog",
+                lambda *a, **k: constructed.append(1),
+            )
+            win._on_import_video_frames()
+            assert constructed == []
+            assert shown == ["视频抽帧正在进行，请稍候。"]
+        finally:
+            win._video_import_ctrl._worker = None
+            win.close()

@@ -33,6 +33,14 @@ TASK_QUALITY_METRICS: dict[str, tuple[str, list[tuple[str, list[str]]]]] = {
             ("Pose mAP50-95", ["metrics/mAP50-95(P)", "metrics/mAP50-95(B)"]),
         ],
     ),
+    "segment": (
+        "mAP (Segment)",
+        [
+            ("Mask mAP50", ["metrics/mAP50(M)", "metrics/mAP50(B)"]),
+            ("Mask mAP50-95", ["metrics/mAP50-95(M)", "metrics/mAP50-95(B)"]),
+            ("Box mAP50", ["metrics/mAP50(B)"]),
+        ],
+    ),
     "classify": (
         "Accuracy",
         [

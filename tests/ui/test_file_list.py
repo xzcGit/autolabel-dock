@@ -356,3 +356,114 @@ class TestFileListWidget:
             assert selected == []
         finally:
             widget.close()
+
+
+class TestRowIndexAndBulkMetadata:
+    """path→row index (O(1) set_status) + bulk metadata on set_image_paths.
+
+    Pins the project-open O(n²) fix: set_status must not scan the whole list,
+    and one set_image_paths call must be able to carry all per-image metadata
+    from the single label scan.
+    """
+
+    def test_set_status_updates_correct_row_via_index(self, qapp):
+        from src.ui.file_list import FileListWidget
+
+        widget = FileListWidget()
+        paths = [Path(f"/imgs/img{i}.jpg") for i in range(5)]
+        widget.set_image_paths(paths)
+
+        widget.set_status(paths[3], "confirmed")
+        assert widget.item(3).text().startswith("✓")
+        # Other rows untouched
+        assert widget.item(0).text().startswith("○")
+
+    def test_index_rebuilt_after_set_image_paths(self, qapp):
+        from src.ui.file_list import FileListWidget
+
+        widget = FileListWidget()
+        old = [Path(f"/imgs/old{i}.jpg") for i in range(3)]
+        widget.set_image_paths(old)
+        new = [Path(f"/imgs/new{i}.jpg") for i in range(4)]
+        widget.set_image_paths(new)
+
+        widget.set_status(new[2], "pending")
+        assert widget.item(2).text().startswith("⚡")
+        # Old path no longer in the list: cache updates, display is a no-op
+        widget.set_status(old[0], "confirmed")
+        assert all(
+            not widget.item(i).text().endswith("old0.jpg") for i in range(widget.count())
+        )
+
+    def test_set_status_unknown_path_is_safe_noop(self, qapp):
+        from src.ui.file_list import FileListWidget
+
+        widget = FileListWidget()
+        widget.set_image_paths([Path("/imgs/a.jpg")])
+        widget.set_status(Path("/imgs/ghost.jpg"), "confirmed")  # must not raise
+        assert widget._statuses["/imgs/ghost.jpg"] == "confirmed"
+        assert widget.count() == 1
+
+    def test_bulk_metadata_renders_and_filters(self, qapp):
+        from src.ui.file_list import FileListWidget
+
+        widget = FileListWidget()
+        paths = [Path(f"/imgs/img{i}.jpg") for i in range(3)]
+        statuses = {str(paths[0]): "confirmed", str(paths[1]): "pending"}
+        classes = {str(paths[0]): {"cat"}, str(paths[1]): {"dog"}}
+        tags = {str(paths[2]): {"night"}}
+        widget.set_image_paths(paths, statuses=statuses, classes=classes, tags=tags)
+
+        assert widget.item(0).text().startswith("✓")
+        assert widget.item(1).text().startswith("⚡")
+        assert widget.item(2).text().startswith("○")
+
+        widget.set_filter("confirmed")
+        assert not widget.item(0).isHidden()
+        assert widget.item(1).isHidden()
+        widget.set_filter(None)
+
+        widget.set_class_filter("dog")
+        assert widget.item(0).isHidden()
+        assert not widget.item(1).isHidden()
+
+    def test_bulk_metadata_replaces_stale_caches(self, qapp):
+        from src.ui.file_list import FileListWidget
+
+        widget = FileListWidget()
+        old = [Path("/imgs/old.jpg")]
+        widget.set_image_paths(old)
+        widget.set_status(old[0], "confirmed")
+        widget.set_image_classes(old[0], {"cat"})
+
+        # New project open passes full (empty) maps → stale entries must go
+        widget.set_image_paths([Path("/imgs/new.jpg")], statuses={}, classes={}, tags={})
+        assert widget._statuses == {}
+        assert widget._image_classes == {}
+        assert widget._image_tags == {}
+
+    def test_omitted_metadata_preserves_caches_for_rescan(self, qapp):
+        from src.ui.file_list import FileListWidget
+
+        widget = FileListWidget()
+        paths = [Path("/imgs/a.jpg")]
+        widget.set_image_paths(paths)
+        widget.set_status(paths[0], "confirmed")
+
+        # refresh_paths path: rebuild without metadata keeps statuses
+        widget.set_image_paths(paths + [Path("/imgs/b.jpg")])
+        assert widget.item(0).text().startswith("✓")
+
+    def test_refresh_row_visibility_uses_index_under_tag_filter(self, qapp):
+        from src.core.tags import TagFilter
+        from src.ui.file_list import FileListWidget
+
+        widget = FileListWidget()
+        paths = [Path(f"/imgs/img{i}.jpg") for i in range(3)]
+        widget.set_image_paths(paths)
+        widget.set_tag_filter(TagFilter(includes=("night",)))
+        assert all(widget.item(i).isHidden() for i in range(3))
+
+        widget.set_image_tags(paths[1], {"night"})
+        assert not widget.item(1).isHidden()
+        assert widget.item(0).isHidden()

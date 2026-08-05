@@ -15,7 +15,7 @@ class TrainTemplate:
     """A named, task-bound snapshot of training parameters."""
 
     name: str
-    task: str  # "detect" | "classify" | "pose"
+    task: str  # "detect" | "classify" | "pose" | "segment"
     params: dict
     created_at: str
     builtin: bool = False
@@ -73,7 +73,7 @@ def extract_task_params(config) -> dict:
 
     Returns a dict with:
       - common params (always)
-      - detect/pose aug params (when task in {"detect", "pose"})
+      - detect/pose/segment aug params (when task in {"detect", "pose", "segment"})
       - classify-only params (when task == "classify")
       - pose-specific params (when task == "pose")
     Excludes runtime-only fields (data_yaml/project/name/resume) and `task`
@@ -82,7 +82,7 @@ def extract_task_params(config) -> dict:
     snapshot = config.to_storage_dict()
     keys = list(_COMMON_KEYS)
     task = config.task
-    if task in ("detect", "pose"):
+    if task in ("detect", "pose", "segment"):
         keys.extend(_DETECT_KEYS)
     if task == "classify":
         keys.extend(_CLASSIFY_KEYS)

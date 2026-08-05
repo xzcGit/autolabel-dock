@@ -39,6 +39,20 @@ class TestNewProjectDialog:
         assert classes == ["cat", "dog", "bird"]
         assert task_type == "detect"  # default
 
+    def test_task_type_selector_offers_segment(self, qapp, tmp_path):
+        from src.ui.dialogs import NewProjectDialog
+
+        dlg = NewProjectDialog()
+        options = [dlg._task_type_combo.itemText(i)
+                   for i in range(dlg._task_type_combo.count())]
+        assert "segment" in options
+
+        dlg._name_edit.setText("seg_project")
+        dlg._dir_edit.setText(str(tmp_path))
+        dlg._task_type_combo.setCurrentText("segment")
+        _, _, _, _, task_type = dlg.get_values()
+        assert task_type == "segment"
+
     def test_rejects_empty_name(self, qapp, tmp_path):
         from src.ui.dialogs import NewProjectDialog
 

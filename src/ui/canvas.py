@@ -16,6 +16,7 @@ from PyQt5.QtGui import (
     QImageReader,
     QFont,
     QCursor,
+    QPolygonF,
     QWheelEvent,
     QMouseEvent,
     QPaintEvent,
@@ -23,6 +24,7 @@ from PyQt5.QtGui import (
 )
 
 from src.core.annotation import Annotation, Keypoint
+from src.core.polygon import bbox_from_polygon, nearest_vertex, nearest_edge
 from src.ui.theme import PALETTE
 
 logger = logging.getLogger(__name__)
@@ -59,6 +61,10 @@ class AnnotationCanvas(QWidget):
     annotations_changed = pyqtSignal()
     keypoint_attach_requested = pyqtSignal(str, float, float)  # ann_id, px, py
     keypoint_selected = pyqtSignal(str, int)  # ann_id, kp_index
+    # SAM prompt forwarding (normalized coords). The canvas only relays the
+    # interaction — it has no knowledge of any segmentation backend.
+    sam_point_requested = pyqtSignal(float, float)              # nx, ny
+    sam_box_requested = pyqtSignal(float, float, float, float)  # x1, y1, x2, y2
 
     zoom_changed = pyqtSignal(float)  # current scale factor
 
@@ -78,7 +84,8 @@ class AnnotationCanvas(QWidget):
         self._offset_x: float = 0.0
         self._offset_y: float = 0.0
 
-        # Tool mode: "select", "draw_bbox", "draw_keypoint"
+        # Tool mode: "select", "draw_bbox", "draw_keypoint", "draw_polygon",
+        # "sam_prompt"
         self.tool_mode: str = "select"
 
         # Annotations
@@ -91,12 +98,16 @@ class AnnotationCanvas(QWidget):
         self._drawing: bool = False
         self._draw_start: tuple[float, float] | None = None  # normalized
         self._draw_current: tuple[float, float] | None = None  # normalized
+        # In-progress polygon vertices (normalized). Non-empty only while a
+        # draw_polygon session is open.
+        self._polygon_points: list[list[float]] = []
 
         # Dragging state (move/resize)
         self._dragging: bool = False
-        self._drag_type: str = ""  # "move", "resize_tl", "resize_br", etc., "move_kp"
+        self._drag_type: str = ""  # "move", "resize_tl", "resize_br", etc., "move_kp", "move_poly_vertex"
         self._drag_ann_id: str | None = None
         self._drag_kp_idx: int = -1
+        self._drag_vertex_idx: int = -1
         self._drag_start_norm: tuple[float, float] | None = None
         self._drag_ann_snapshot: dict | None = None
 
@@ -152,6 +163,15 @@ class AnnotationCanvas(QWidget):
         """Set the annotations to display."""
         self._annotations = list(annotations)
         self._selected_id = None
+        # The annotation set was replaced (image switch, undo restore, reload):
+        # an in-progress polygon draft is stale — drop it so it can't render
+        # over (or be committed onto) the wrong image. Bbox/keypoint drafts
+        # have no such window (they only exist while the mouse button is held).
+        if self._polygon_points:
+            self._polygon_points = []
+            if not self._drawing:
+                self._draw_start = None
+                self._draw_current = None
         self.update()
 
     def set_class_colors(self, colors: dict[str, str]) -> None:
@@ -167,14 +187,15 @@ class AnnotationCanvas(QWidget):
         self.update()
 
     def set_tool_mode(self, mode: str) -> None:
-        """Set tool mode: 'select', 'draw_bbox', 'draw_keypoint'."""
+        """Set tool mode: 'select', 'draw_bbox', 'draw_keypoint', 'draw_polygon', 'sam_prompt'."""
         self.tool_mode = mode
         self._drawing = False
         self._draw_start = None
         self._draw_current = None
+        self._polygon_points = []
         if mode == "select":
             self.setCursor(Qt.ArrowCursor)
-        elif mode in ("draw_bbox", "draw_keypoint"):
+        elif mode in ("draw_bbox", "draw_keypoint", "draw_polygon", "sam_prompt"):
             self.setCursor(Qt.CrossCursor)
 
     def set_locked(self, locked: bool) -> None:
@@ -217,6 +238,7 @@ class AnnotationCanvas(QWidget):
         """Clear in-progress drawing state."""
         self._draw_start = None
         self._draw_current = None
+        self._polygon_points = []
         self.update()
 
     def consume_draw_start(self) -> tuple[float, float] | None:
@@ -240,6 +262,7 @@ class AnnotationCanvas(QWidget):
         self._drawing = False
         self._draw_start = None
         self._draw_current = None
+        self._polygon_points = []
         self._conflict_pairs.clear()
         self.update()
 
@@ -364,6 +387,10 @@ class AnnotationCanvas(QWidget):
         if self._drawing and self._draw_start and self._draw_current:
             self._paint_drawing_preview(painter)
 
+        # Draw in-progress polygon
+        if self.tool_mode == "draw_polygon" and self._polygon_points:
+            self._paint_polygon_preview(painter)
+
         # Zoom level indicator + lock badge
         if self._image is not None:
             font = QFont()
@@ -394,13 +421,15 @@ class AnnotationCanvas(QWidget):
         self, painter: QPainter, ann: Annotation, color: QColor, selected: bool,
         draw_labels: bool = True,
     ) -> None:
-        """Paint a single annotation (bbox + keypoints + label)."""
+        """Paint a single annotation (polygon/bbox + keypoints + label)."""
         in_conflict = ann.id in self._conflict_pairs
         if ann.bbox:
             cx, cy, w, h = ann.bbox
             x1, y1 = self.norm_to_pixel(cx - w / 2, cy - h / 2)
             x2, y2 = self.norm_to_pixel(cx + w / 2, cy + h / 2)
 
+            # Pen shared by polygon and rect: conflict teal / unconfirmed
+            # dashed / selected thicker.
             if in_conflict and not ann.confirmed:
                 # Conflict prediction: teal dashed, thicker
                 pen = QPen(QColor(PALETTE["teal"]), 3, Qt.DashLine)
@@ -411,8 +440,20 @@ class AnnotationCanvas(QWidget):
             if selected:
                 pen.setWidth(pen.width() + 1)
             painter.setPen(pen)
-            painter.setBrush(Qt.NoBrush)
-            painter.drawRect(QRectF(x1, y1, x2 - x1, y2 - y1))
+
+            if ann.polygon:
+                # Filled polygon; the derived bbox drives label/culling but is
+                # not itself drawn (avoids a double outline).
+                fill = QColor(color)
+                fill.setAlpha(50)
+                painter.setBrush(QBrush(fill))
+                qpoly = QPolygonF(
+                    [QPointF(*self.norm_to_pixel(vx, vy)) for vx, vy in ann.polygon]
+                )
+                painter.drawPolygon(qpoly)
+            else:
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRect(QRectF(x1, y1, x2 - x1, y2 - y1))
 
             # Label background (skip at low zoom for performance)
             if draw_labels or selected:
@@ -438,7 +479,10 @@ class AnnotationCanvas(QWidget):
 
             # Control handles when selected
             if selected:
-                self._paint_handles(painter, x1, y1, x2, y2)
+                if ann.polygon:
+                    self._paint_vertex_handles(painter, ann.polygon)
+                else:
+                    self._paint_handles(painter, x1, y1, x2, y2)
 
         # Keypoints
         for i, kp in enumerate(ann.keypoints):
@@ -479,6 +523,15 @@ class AnnotationCanvas(QWidget):
         for hx, hy in [(x1, y1), (x2, y1), (x1, y2), (x2, y2)]:
             painter.drawRect(QRectF(hx - hs, hy - hs, hs * 2, hs * 2))
 
+    def _paint_vertex_handles(self, painter: QPainter, polygon: list[list[float]]) -> None:
+        """Paint draggable handles on a selected polygon's vertices."""
+        painter.setPen(QPen(QColor(PALETTE["text"]), 1))
+        painter.setBrush(QBrush(QColor(PALETTE["primary"])))
+        hs = HANDLE_SIZE
+        for vx, vy in polygon:
+            hx, hy = self.norm_to_pixel(vx, vy)
+            painter.drawRect(QRectF(hx - hs, hy - hs, hs * 2, hs * 2))
+
     def _paint_drawing_preview(self, painter: QPainter) -> None:
         """Paint the bbox being drawn with size HUD."""
         sx, sy = self.norm_to_pixel(*self._draw_start)
@@ -512,6 +565,40 @@ class AnnotationCanvas(QWidget):
             painter.setPen(QColor(PALETTE["text"]))
             painter.drawText(QRectF(label_x, label_y, tw, th), Qt.AlignCenter, size_text)
 
+    def _paint_polygon_preview(self, painter: QPainter) -> None:
+        """Paint the polygon being drawn: placed vertices + rubber-band edges."""
+        pts_px = [self.norm_to_pixel(vx, vy) for vx, vy in self._polygon_points]
+
+        # Edges between placed vertices
+        painter.setPen(QPen(QColor(PALETTE["primary"]), 2))
+        painter.setBrush(Qt.NoBrush)
+        for i in range(len(pts_px) - 1):
+            ax, ay = pts_px[i]
+            bx, by = pts_px[i + 1]
+            painter.drawLine(QPointF(ax, ay), QPointF(bx, by))
+
+        # Rubber-band edges to the cursor: last vertex → cursor, and cursor →
+        # first vertex (the closing hint) when ≥2 vertices are down.
+        if self._draw_current is not None:
+            cx, cy = self.norm_to_pixel(*self._draw_current)
+            lx, ly = pts_px[-1]
+            painter.setPen(QPen(QColor(PALETTE["primary"]), 1, Qt.DashLine))
+            painter.drawLine(QPointF(lx, ly), QPointF(cx, cy))
+            if len(pts_px) >= 2:
+                fx, fy = pts_px[0]
+                painter.setPen(QPen(QColor(PALETTE["teal"]), 1, Qt.DotLine))
+                painter.drawLine(QPointF(cx, cy), QPointF(fx, fy))
+
+        # Vertex dots (first vertex emphasized as the closing target)
+        painter.setPen(QPen(QColor(PALETTE["text"]), 1))
+        for i, (vx, vy) in enumerate(pts_px):
+            if i == 0:
+                painter.setBrush(QBrush(QColor(PALETTE["teal"])))
+                painter.drawEllipse(QPointF(vx, vy), HANDLE_SIZE, HANDLE_SIZE)
+            else:
+                painter.setBrush(QBrush(QColor(PALETTE["primary"])))
+                painter.drawEllipse(QPointF(vx, vy), HANDLE_SIZE - 1, HANDLE_SIZE - 1)
+
     # ── Mouse events ───────────────────────────────────────────
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
@@ -531,7 +618,9 @@ class AnnotationCanvas(QWidget):
         if event.button() != Qt.LeftButton:
             return
 
-        if self.tool_mode == "draw_bbox":
+        if self.tool_mode in ("draw_bbox", "sam_prompt"):
+            # sam_prompt shares the rubber-band gesture: a click becomes a
+            # point prompt, a drag becomes a box prompt (decided on release).
             nx, ny = self._clamp_norm(*self.pixel_to_norm(px, py))
             self._drawing = True
             self._draw_start = (nx, ny)
@@ -543,6 +632,16 @@ class AnnotationCanvas(QWidget):
             # Don't emit class_requested here — do it on mouse release
             # to avoid popup appearing while mouse button is still pressed
 
+        elif self.tool_mode == "draw_polygon":
+            nx, ny = self._clamp_norm(*self.pixel_to_norm(px, py))
+            # First vertex also seeds _draw_start so resizeEvent's refit guard
+            # and clear_draw_state semantics apply during the polygon session.
+            if not self._polygon_points:
+                self._draw_start = (nx, ny)
+            self._polygon_points.append([nx, ny])
+            self._draw_current = (nx, ny)
+            self.update()
+
         elif self.tool_mode == "select":
             # Check if clicking a handle first (for selected bbox)
             handle = self._hit_test_handle(px, py)
@@ -550,6 +649,20 @@ class AnnotationCanvas(QWidget):
                 self._dragging = True
                 self._drag_type = handle
                 self._drag_ann_id = self._selected_id
+                self._drag_start_norm = self.pixel_to_norm(px, py)
+                ann = self.get_selected_annotation()
+                if ann:
+                    self._drag_ann_snapshot = ann.to_dict()
+                return
+
+            # Check if clicking a polygon vertex to drag (selected polygon only)
+            vtx_hit = self._hit_test_polygon_vertex(px, py)
+            if vtx_hit:
+                ann_id, vtx_idx = vtx_hit
+                self._dragging = True
+                self._drag_type = "move_poly_vertex"
+                self._drag_ann_id = ann_id
+                self._drag_vertex_idx = vtx_idx
                 self._drag_start_norm = self.pixel_to_norm(px, py)
                 ann = self.get_selected_annotation()
                 if ann:
@@ -599,6 +712,13 @@ class AnnotationCanvas(QWidget):
             self.update()
             return
 
+        # Polygon rubber-band: follow the cursor between vertex clicks.
+        if self.tool_mode == "draw_polygon" and self._polygon_points:
+            nx, ny = self._clamp_norm(*self.pixel_to_norm(px, py))
+            self._draw_current = (nx, ny)
+            self.update()
+            return
+
         if self._dragging and self._drag_ann_id:
             nx, ny = self.pixel_to_norm(px, py)
             self._handle_drag(nx, ny)
@@ -616,6 +736,8 @@ class AnnotationCanvas(QWidget):
                     self.setCursor(Qt.SizeFDiagCursor)
                 else:
                     self.setCursor(Qt.SizeBDiagCursor)
+            elif self._hit_test_polygon_vertex(px, py):
+                self.setCursor(Qt.SizeAllCursor)
             elif self._hit_test_keypoint(px, py):
                 self.setCursor(Qt.SizeAllCursor)
             elif self.hit_test(px, py):
@@ -639,6 +761,22 @@ class AnnotationCanvas(QWidget):
             return
 
         if event.button() != Qt.LeftButton:
+            return
+
+        if self._drawing and self._draw_start and self.tool_mode == "sam_prompt":
+            nx, ny = self._clamp_norm(*self.pixel_to_norm(px, py))
+            sx, sy = self._draw_start
+            self._drawing = False
+            self._draw_start = None
+            self._draw_current = None
+            self.update()
+            # Same 1% minimum as bbox drawing separates click from drag.
+            if abs(nx - sx) > 0.01 and abs(ny - sy) > 0.01:
+                self.sam_box_requested.emit(
+                    min(sx, nx), min(sy, ny), max(sx, nx), max(sy, ny),
+                )
+            else:
+                self.sam_point_requested.emit(sx, sy)
             return
 
         if self._drawing and self._draw_start and self.tool_mode == "draw_bbox":
@@ -669,12 +807,34 @@ class AnnotationCanvas(QWidget):
             return
 
         if self._dragging:
-            if self._drag_type in ("move", "resize_tl", "resize_tr", "resize_bl", "resize_br", "move_kp"):
+            if self._drag_type in (
+                "move", "resize_tl", "resize_tr", "resize_bl", "resize_br",
+                "move_kp", "move_poly_vertex",
+            ):
                 self.annotation_modified.emit(self._drag_ann_id)
             self._dragging = False
             self._drag_type = ""
             self._drag_ann_id = None
+            self._drag_kp_idx = -1
+            self._drag_vertex_idx = -1
             self._drag_ann_snapshot = None
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        """Double-click closes an in-progress polygon.
+
+        Qt delivers double-click as press → release → dblClick → release, so
+        the first press already appended a vertex. Drop the duplicate final
+        vertex left by that press before closing.
+        """
+        if (
+            event.button() == Qt.LeftButton
+            and self.tool_mode == "draw_polygon"
+            and self._polygon_points
+        ):
+            self._dedupe_last_polygon_vertex()
+            self.finish_polygon(event.x(), event.y())
+            return
+        super().mouseDoubleClickEvent(event)
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         if event.modifiers() & Qt.ControlModifier:
@@ -754,6 +914,29 @@ class AnnotationCanvas(QWidget):
 
                 menu.addSeparator()
 
+        # Polygon vertex / edge actions (annotation already selected above, so
+        # the vertex/edge hit-tests target it).
+        if ann.polygon:
+            vtx_hit = self._hit_test_polygon_vertex(px, py)
+            if vtx_hit and vtx_hit[0] == hit_id:
+                vtx_idx = vtx_hit[1]
+                poly_header = menu.addAction(f"多边形顶点 {vtx_idx}")
+                poly_header.setEnabled(False)
+                del_vtx = menu.addAction("删除顶点")
+                del_vtx.setEnabled(len(ann.polygon) > 3)
+                del_vtx.triggered.connect(
+                    lambda _, aid=ann.id, vi=vtx_idx: self.remove_polygon_vertex(aid, vi))
+                menu.addSeparator()
+            else:
+                edge_idx = self._hit_test_polygon_edge(px, py)
+                if edge_idx is not None:
+                    nx, ny = self.pixel_to_norm(px, py)
+                    ins_vtx = menu.addAction("在此处插入顶点")
+                    ins_vtx.triggered.connect(
+                        lambda _, aid=ann.id, ei=edge_idx, ix=nx, iy=ny:
+                        self.insert_polygon_vertex(aid, ei, ix, iy))
+                    menu.addSeparator()
+
         # Conflict resolution options
         paired_id = self._conflict_pairs.get(ann.id)
         if paired_id:
@@ -796,7 +979,7 @@ class AnnotationCanvas(QWidget):
         menu.exec_(event.globalPos())
 
     def resizeEvent(self, event: QResizeEvent) -> None:
-        if self._image and not self._draw_start:
+        if self._image and not self._draw_start and not self._polygon_points:
             self._fit_to_window()
         super().resizeEvent(event)
 
@@ -823,6 +1006,21 @@ class AnnotationCanvas(QWidget):
         dy = ny - self._drag_start_norm[1]
 
         if self._drag_type == "move" and ann.bbox and self._drag_ann_snapshot:
+            if ann.polygon and self._drag_ann_snapshot.get("polygon"):
+                # Polygon move: translate every vertex from the snapshot,
+                # clamping the delta so the whole polygon stays in bounds, then
+                # rederive the bbox (single source of truth: polygon → bbox).
+                orig_poly = self._drag_ann_snapshot["polygon"]
+                xs = [p[0] for p in orig_poly]
+                ys = [p[1] for p in orig_poly]
+                cdx = max(-min(xs), min(1.0 - max(xs), dx))
+                cdy = max(-min(ys), min(1.0 - max(ys), dy))
+                ann.polygon = [[p[0] + cdx, p[1] + cdy] for p in orig_poly]
+                ann.bbox = bbox_from_polygon(ann.polygon)
+                if not ann.confirmed:
+                    ann.confirmed = True
+                self.annotations_changed.emit()
+                return
             orig_bbox = self._drag_ann_snapshot["bbox"]
             new_cx = orig_bbox[0] + dx
             new_cy = orig_bbox[1] + dy
@@ -839,6 +1037,15 @@ class AnnotationCanvas(QWidget):
             if not ann.confirmed:
                 ann.confirmed = True
             self.annotations_changed.emit()
+
+        elif self._drag_type == "move_poly_vertex" and ann.polygon:
+            if 0 <= self._drag_vertex_idx < len(ann.polygon):
+                cx, cy = self._clamp_norm(nx, ny)
+                ann.polygon[self._drag_vertex_idx] = [cx, cy]
+                ann.bbox = bbox_from_polygon(ann.polygon)
+                if not ann.confirmed:
+                    ann.confirmed = True
+                self.annotations_changed.emit()
 
         elif self._drag_type == "move_kp":
             if 0 <= self._drag_kp_idx < len(ann.keypoints):
@@ -879,6 +1086,10 @@ class AnnotationCanvas(QWidget):
         ann = self.get_selected_annotation()
         if not ann or not ann.bbox:
             return None
+        # A polygon's bbox is derived — it exposes vertex handles, not corner
+        # resize handles (resizing the box would desync the polygon).
+        if ann.polygon:
+            return None
 
         cx, cy, w, h = ann.bbox
         corners = {
@@ -892,6 +1103,39 @@ class AnnotationCanvas(QWidget):
             if abs(px - hpx) <= HANDLE_SIZE + 2 and abs(py - hpy) <= HANDLE_SIZE + 2:
                 return handle_name
         return None
+
+    def _hit_test_polygon_vertex(self, px: float, py: float) -> tuple[str, int] | None:
+        """Check if pixel pos hits a vertex of the selected polygon.
+
+        Only the selected polygon exposes vertex handles (mirrors the
+        bbox-handle rule: interaction targets belong to the active selection).
+        Returns (ann_id, vertex_index) or None.
+        """
+        if not self._selected_id:
+            return None
+        ann = self.get_selected_annotation()
+        if not ann or not ann.polygon:
+            return None
+        nx, ny = self.pixel_to_norm(px, py)
+        tol = (HANDLE_SIZE + 2) / (self._image_w * self._scale) if self._image_w * self._scale > 0 else 0.0
+        idx = nearest_vertex(nx, ny, ann.polygon, tol)
+        if idx is None:
+            return None
+        return ann.id, idx
+
+    def _hit_test_polygon_edge(self, px: float, py: float) -> int | None:
+        """Return the edge index of the selected polygon under the cursor, else None.
+
+        The new vertex for edge ``i`` is inserted at position ``i + 1``.
+        """
+        if not self._selected_id:
+            return None
+        ann = self.get_selected_annotation()
+        if not ann or not ann.polygon:
+            return None
+        nx, ny = self.pixel_to_norm(px, py)
+        tol = (HANDLE_SIZE + 4) / (self._image_w * self._scale) if self._image_w * self._scale > 0 else 0.0
+        return nearest_edge(nx, ny, ann.polygon, tol)
 
     def _hit_test_keypoint(self, px: float, py: float) -> tuple[str, int] | None:
         """Check if pixel pos hits a keypoint. Returns (ann_id, kp_index) or None."""
@@ -970,6 +1214,135 @@ class AnnotationCanvas(QWidget):
         self._draw_start = None
         self.update()
         return ann
+
+    # ── Polygon (segment) drawing + editing ────────────────────
+
+    @property
+    def has_polygon_draft(self) -> bool:
+        """True while a draw_polygon session has at least one placed vertex."""
+        return bool(self._polygon_points)
+
+    def _dedupe_last_polygon_vertex(self) -> None:
+        """Drop a trailing near-duplicate vertex.
+
+        A double-click's first press appends a vertex before
+        ``mouseDoubleClickEvent`` fires; when the user double-clicks on their
+        last placed vertex that appended point duplicates it, so remove it.
+        """
+        pts = self._polygon_points
+        if len(pts) < 2:
+            return
+        ax, ay = pts[-1]
+        bx, by = pts[-2]
+        tol_x = HANDLE_SIZE / (self._image_w * self._scale) if self._image_w * self._scale > 0 else 0.0
+        tol_y = HANDLE_SIZE / (self._image_h * self._scale) if self._image_h * self._scale > 0 else 0.0
+        if abs(ax - bx) <= tol_x and abs(ay - by) <= tol_y:
+            pts.pop()
+
+    def finish_polygon(self, px: float | None = None, py: float | None = None) -> bool:
+        """Close the in-progress polygon and request a class if it has ≥3 vertices.
+
+        Returns True when a class picker was requested (the draft is kept so
+        ``create_polygon_from_draw`` can read the vertices after selection);
+        False when there aren't enough vertices yet (draft kept, keep drawing).
+        ``px``/``py`` anchor the class picker; default to the last vertex.
+        """
+        if self.tool_mode != "draw_polygon" or len(self._polygon_points) < 3:
+            return False
+        if px is None or py is None:
+            lx, ly = self._polygon_points[-1]
+            px, py = self.norm_to_pixel(lx, ly)
+        self.class_requested.emit(px, py)
+        return True
+
+    def begin_polygon_from_points(self, points: list[list[float]]) -> bool:
+        """Stage an externally-computed polygon (e.g. a SAM mask) as the draft
+        and request a class.
+
+        The vertices become the pending draft consumed by
+        ``create_polygon_from_draw`` after the class picker — the exact reuse
+        path of a hand-drawn polygon close. Returns False (draft untouched)
+        for degenerate input (<3 vertices).
+        """
+        if not points or len(points) < 3:
+            return False
+        self._polygon_points = [[float(x), float(y)] for x, y in points]
+        px, py = self.norm_to_pixel(*self._polygon_points[0])
+        self.class_requested.emit(px, py)
+        self.update()
+        return True
+
+    def create_polygon_from_draw(
+        self,
+        class_name: str,
+        class_id: int,
+        source: str = "manual",
+        confirmed: bool = True,
+    ) -> Annotation | None:
+        """Create a polygon annotation (+ derived bbox) from the placed vertices.
+
+        ``source``/``confirmed`` let assisted flows (SAM) mark the result as
+        an unconfirmed auto annotation while hand-drawn polygons keep the
+        manual/confirmed defaults.
+        """
+        if len(self._polygon_points) < 3:
+            self._polygon_points = []
+            self._draw_start = None
+            self._draw_current = None
+            return None
+        poly = [[float(x), float(y)] for x, y in self._polygon_points]
+        ann = Annotation(
+            class_name=class_name,
+            class_id=class_id,
+            bbox=bbox_from_polygon(poly),
+            polygon=poly,
+            confirmed=confirmed,
+            source=source,
+        )
+        self._annotations.append(ann)
+        self.select_annotation(ann.id)
+        self.annotation_created.emit(ann)
+        self.annotations_changed.emit()
+        self._polygon_points = []
+        self._draw_start = None
+        self._draw_current = None
+        self.update()
+        return ann
+
+    def insert_polygon_vertex(self, ann_id: str, edge_idx: int, x: float, y: float) -> None:
+        """Insert a vertex after ``edge_idx`` (between edge_idx and the next).
+
+        Recomputes the derived bbox and auto-confirms (any manual edit
+        confirms, matching bbox/keypoint editing).
+        """
+        for ann in self._annotations:
+            if ann.id == ann_id and ann.polygon:
+                x = max(0.0, min(1.0, x))
+                y = max(0.0, min(1.0, y))
+                ann.polygon.insert(edge_idx + 1, [x, y])
+                ann.bbox = bbox_from_polygon(ann.polygon)
+                if not ann.confirmed:
+                    ann.confirmed = True
+                self.annotation_modified.emit(ann_id)
+                self.annotations_changed.emit()
+                self.update()
+                return
+
+    def remove_polygon_vertex(self, ann_id: str, vtx_idx: int) -> None:
+        """Remove a polygon vertex; refuses to drop below a triangle (3 pts)."""
+        for ann in self._annotations:
+            if ann.id == ann_id and ann.polygon:
+                if len(ann.polygon) <= 3:
+                    return
+                if 0 <= vtx_idx < len(ann.polygon):
+                    ann.polygon.pop(vtx_idx)
+                    ann.bbox = bbox_from_polygon(ann.polygon)
+                    if not ann.confirmed:
+                        ann.confirmed = True
+                    self.annotation_modified.emit(ann_id)
+                    self.annotations_changed.emit()
+                    self.update()
+                return
 
     def select_keypoint(self, ann_id: str, kp_idx: int) -> None:
         """Select a specific keypoint within an annotation."""

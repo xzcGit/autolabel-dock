@@ -15,11 +15,12 @@ class TestTrainPanel:
 
         panel = TrainPanel()
         assert panel._task_combo is not None
-        # Should have detect, classify, pose
+        # Should have detect, classify, pose, segment
         items = [panel._task_combo.itemText(i) for i in range(panel._task_combo.count())]
         assert "detect" in items
         assert "classify" in items
         assert "pose" in items
+        assert "segment" in items
 
     def test_has_hyperparameters(self, qapp):
         from src.ui.train_panel import TrainPanel

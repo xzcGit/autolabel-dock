@@ -35,6 +35,11 @@ class Annotation:
     class_id: int
     bbox: tuple[float, float, float, float] | None = None  # (cx, cy, w, h) normalized
     keypoints: list[Keypoint] = field(default_factory=list)
+    # Segment (instance segmentation) polygon: [[x, y], ...] normalized [0,1].
+    # None for detect/pose/classify. A polygon always carries a *derived* bbox
+    # (its axis-aligned bounding box) so bbox-based logic (IoU conflict,
+    # viewport culling, stats) needs no polygon awareness.
+    polygon: list[list[float]] | None = None
     confidence: float = 1.0
     confirmed: bool = True
     source: str = "manual"
@@ -47,6 +52,9 @@ class Annotation:
             "class_id": self.class_id,
             "bbox": list(self.bbox) if self.bbox else None,
             "keypoints": [kp.to_dict() for kp in self.keypoints],
+            # Fresh nested lists so the snapshot never aliases the live polygon
+            # (undo/redo depend on to_dict/from_dict being a deep copy).
+            "polygon": [[p[0], p[1]] for p in self.polygon] if self.polygon else None,
             "confidence": self.confidence,
             "confirmed": self.confirmed,
             "source": self.source,
@@ -56,20 +64,41 @@ class Annotation:
     def from_dict(cls, d: dict) -> Annotation:
         bbox = tuple(d["bbox"]) if d.get("bbox") else None
         keypoints = [Keypoint.from_dict(kp) for kp in d.get("keypoints", [])]
+        raw_polygon = d.get("polygon")
+        polygon = (
+            [[float(x), float(y)] for x, y in raw_polygon] if raw_polygon else None
+        )
         return cls(
             id=d["id"],
             class_name=d["class_name"],
             class_id=d["class_id"],
             bbox=bbox,
             keypoints=keypoints,
+            polygon=polygon,
             confidence=d.get("confidence", 1.0),
             confirmed=d.get("confirmed", True),
             source=d.get("source", "manual"),
         )
 
     def clamp(self) -> None:
-        """Clamp bbox and keypoints to [0, 1] image bounds."""
-        if self.bbox:
+        """Clamp bbox/polygon/keypoints to [0, 1] image bounds.
+
+        When a polygon is present the derived bbox is recomputed from the
+        clamped vertices so the polygon↔bbox invariant survives the clamp.
+        """
+        if self.polygon:
+            for pt in self.polygon:
+                pt[0] = max(0.0, min(1.0, pt[0]))
+                pt[1] = max(0.0, min(1.0, pt[1]))
+            xs = [p[0] for p in self.polygon]
+            ys = [p[1] for p in self.polygon]
+            self.bbox = (
+                (min(xs) + max(xs)) / 2,
+                (min(ys) + max(ys)) / 2,
+                max(xs) - min(xs),
+                max(ys) - min(ys),
+            )
+        elif self.bbox:
             cx, cy, w, h = self.bbox
             x1 = max(0.0, cx - w / 2)
             y1 = max(0.0, cy - h / 2)

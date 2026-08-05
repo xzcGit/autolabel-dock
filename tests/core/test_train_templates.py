@@ -236,9 +236,27 @@ class TestExtractTaskParams:
     def test_unknown_task_falls_back_to_common_only(self):
         from src.core.train_templates import extract_task_params
 
-        cfg = self._base_config("segment", mosaic=0.5, erasing=0.5, pose=10.0)
+        cfg = self._base_config("obb", mosaic=0.5, erasing=0.5, pose=10.0)
         params = extract_task_params(cfg)
         assert params["epochs"] == cfg.epochs
         assert "mosaic" not in params
         assert "erasing" not in params
         assert "pose" not in params
+
+    def test_segment_keeps_detect_aug_drops_pose_and_classify(self):
+        from src.core.train_templates import extract_task_params
+
+        cfg = self._base_config(
+            "segment",
+            epochs=60, mosaic=0.7, copy_paste=0.3, include_detect_params=True,
+            erasing=0.5, pose=10.0,
+        )
+        params = extract_task_params(cfg)
+        # Detect-group augmentation available for segment
+        assert params["mosaic"] == 0.7
+        assert params["copy_paste"] == 0.3
+        assert params["include_detect_params"] is True
+        # Classify- and pose-only knobs dropped
+        assert "erasing" not in params
+        assert "pose" not in params
+        assert "include_pose_params" not in params

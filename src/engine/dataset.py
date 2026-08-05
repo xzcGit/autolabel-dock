@@ -13,6 +13,7 @@ import yaml
 from src.core.annotation import ImageAnnotation
 from src.core.class_mapping import ResolvedClassMap, resolve_detection_class_map
 from src.core.label_io import load_annotation
+from src.core.polygon import bbox_to_polygon
 from src.core.project import ProjectManager
 from src.core.tags import TagFilter
 from src.utils.fs import link_or_copy
@@ -200,9 +201,28 @@ class DatasetPreparer:
 
                 lines = []
                 for ann in ia.annotations:
-                    if ann.bbox is None:
+                    if ann.bbox is None and not ann.polygon:
                         continue
                     cid = class_map.id_by_name[ann.class_name]
+                    if task == "segment":
+                        # YOLO-seg row is a pure polygon (cid x1 y1 ... xn yn),
+                        # NO bbox fields. Ultralytics reshapes any file whose
+                        # rows exceed 6 fields as (-1, 2), so a plain-bbox
+                        # annotation must be folded to a 4-corner polygon rather
+                        # than written as a 5-field row (which would corrupt the
+                        # whole file). <3-vertex polygons are skipped.
+                        points = ann.polygon or (
+                            bbox_to_polygon(ann.bbox) if ann.bbox else None
+                        )
+                        if not points or len(points) < 3:
+                            continue
+                        parts = [f"{cid}"]
+                        for px, py in points:
+                            parts.extend([f"{px:.6f}", f"{py:.6f}"])
+                        lines.append(" ".join(parts))
+                        continue
+                    if ann.bbox is None:
+                        continue
                     cx, cy, w, h = ann.bbox
                     parts = [f"{cid}", f"{cx:.6f}", f"{cy:.6f}", f"{w:.6f}", f"{h:.6f}"]
                     if task == "pose" and ann.keypoints:

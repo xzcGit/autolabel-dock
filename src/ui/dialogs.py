@@ -53,7 +53,7 @@ class NewProjectDialog(QDialog):
 
         # Task type selector
         self._task_type_combo = QComboBox()
-        self._task_type_combo.addItems(["detect", "pose", "classify"])
+        self._task_type_combo.addItems(["detect", "pose", "classify", "segment"])
         self._task_type_combo.setCurrentText("detect")
         form.addRow("任务类型:", self._task_type_combo)
 

@@ -14,6 +14,18 @@ class TestExportRegistry:
         assert "COCO" in names
         assert "labelme" in names
 
+    def test_yolo_segment_exporter_registered(self):
+        """YOLO-seg must be a real registered exporter (the unregistered
+        export_yolo_pose precedent is NOT copied — seg export must be reachable
+        from the UI)."""
+        from src.core.formats import get_export_registry
+        from src.core.formats.yolo import export_yolo_segment
+
+        info = get_export_registry().get("YOLO-seg")
+        assert info is not None
+        assert info.export_fn is export_yolo_segment
+        assert info.needs_classes is True
+
     def test_get_returns_exporter_info(self):
         from src.core.formats import get_export_registry
 

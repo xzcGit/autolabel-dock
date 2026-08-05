@@ -25,6 +25,10 @@ class TaskView(QWidget):
     auto_label_single_requested = pyqtSignal()
     auto_label_batch_requested = pyqtSignal()
     images_dropped = pyqtSignal(list)                # list[Path]
+    # list[Path] — 视频文件拖入（仅 detect/pose 的文件列表有拖放源；classify
+    # 与 images_dropped 一样没有来源，走文件菜单入口）。壳转发给 MainWindow，
+    # 由其打开视频抽帧导入对话框。
+    videos_dropped = pyqtSignal(list)
     classes_changed = pyqtSignal()                   # 视图修改了 project.config.classes
     # Per-image user-tag edits — payload (path, new_tags).
     # The view persists the change locally; MainWindow listens to merge any

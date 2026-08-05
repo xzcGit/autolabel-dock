@@ -342,6 +342,33 @@ class TestTrainer:
         assert metrics["mAP50"] == 0.89
         assert metrics["mAP50-95"] == 0.67
 
+    def test_get_best_metrics_keeps_segment_mask_suffix_distinct_from_box(self):
+        """Segment emits both (B) and (M) variants. Stripping (M) too would
+        collapse mAP50(M) onto mAP50(B) — they must both survive as distinct
+        keys (box → clean name, mask → keeps its (M) suffix)."""
+        mock_yolo_cls = MagicMock()
+        mock_model = MagicMock()
+        mock_yolo_cls.return_value = mock_model
+        mock_model.trainer = MagicMock()
+        mock_model.trainer.metrics = {
+            "metrics/mAP50(B)": 0.80,
+            "metrics/mAP50(M)": 0.72,
+            "metrics/mAP50-95(B)": 0.60,
+            "metrics/mAP50-95(M)": 0.55,
+        }
+        mock_model.train.return_value = MagicMock()
+
+        cfg = TrainConfig(data_yaml="/data.yaml", model="yolov8n-seg.pt", task="segment")
+        trainer = Trainer(yolo_cls=mock_yolo_cls)
+        trainer.train(cfg)
+        metrics = trainer.get_best_metrics()
+
+        # Box variant: clean name; mask variant: keeps (M); no collision.
+        assert metrics["mAP50"] == 0.80
+        assert metrics["mAP50(M)"] == 0.72
+        assert metrics["mAP50-95"] == 0.60
+        assert metrics["mAP50-95(M)"] == 0.55
+
     def test_cancel_mid_epoch_via_batch_callback(self):
         """Simulates the inner ultralytics batch loop firing on_train_batch_end.
 

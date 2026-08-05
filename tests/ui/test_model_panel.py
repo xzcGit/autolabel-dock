@@ -194,6 +194,20 @@ class TestFormatTrainParams:
         assert "[Detect 增强]" not in off
         assert "mosaic" not in off
 
+    def test_segment_shows_detect_aug_group(self, qapp):
+        """Segment trains with the detect augmentation group; its model info
+        must render that section like a detect model does."""
+        from src.ui.model_panel import _format_train_params
+
+        text = _format_train_params(
+            {"epochs": 1, "include_detect_params": True, "mosaic": 0.7, "copy_paste": 0.3},
+            "segment",
+        )
+
+        assert "[Detect 增强]" in text
+        assert "mosaic=0.7" in text
+        assert "copy_paste=0.3" in text
+
     def test_classify_aug_shown_only_when_flag_active(self, qapp):
         from src.ui.model_panel import _format_train_params
 

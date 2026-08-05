@@ -147,7 +147,7 @@ class TrainPanel(QWidget):
         task_group = QGroupBox("任务配置")
         task_form = QFormLayout(task_group)
         self._task_combo = QComboBox()
-        self._task_combo.addItems(["detect", "classify", "pose"])
+        self._task_combo.addItems(["detect", "classify", "pose", "segment"])
         task_form.addRow("任务类型:", self._task_combo)
 
         self._model_combo = QComboBox()

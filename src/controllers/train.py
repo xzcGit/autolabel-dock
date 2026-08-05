@@ -84,7 +84,8 @@ class TrainController:
                     confirmed_count += 1
                     cls = ia.image_tags[0]
                     class_counts[cls] = class_counts.get(cls, 0) + 1
-            # Detection/Pose: count confirmed annotations
+            # Detection/Pose/Segment: count confirmed annotations (a segment
+            # annotation carries polygon and/or a derived bbox — both count).
             else:
                 for ann in ia.annotations:
                     if ann.confirmed:
@@ -121,7 +122,7 @@ class TrainController:
             output_dir, task=task, val_ratio=val_ratio, kpt_shape=kpt_shape,
             tag_filter=tag_filter,
         )
-        if task in {"detect", "pose"}:
+        if task in {"detect", "pose", "segment"}:
             data = yaml.safe_load(Path(data_yaml).read_text(encoding="utf-8")) or {}
             self._prepared_classes = list(data.get("names", []))
         else:

@@ -55,6 +55,7 @@ class DetectPoseView(TaskView):
         image_cache: ImageCache,
         undo_stacks: "OrderedDict[str, UndoStack]",
         label_store: LabelStore | None = None,
+        sam_controller=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -63,6 +64,11 @@ class DetectPoseView(TaskView):
         self._current_annotation: ImageAnnotation | None = None
         self._image_cache = image_cache
         self._undo_stacks = undo_stacks
+        # SAM assist controller — lazily constructed on first SAM tool
+        # activation (keeps startup free of any model cost); ``sam_controller``
+        # is a test injection point (a fake avoids ultralytics entirely).
+        self._sam_ctrl = sam_controller
+        self._sam_wired = False
         # Shared LabelStore (injected by the shell) — reads flush pending
         # edits first. A private, callback-less store keeps direct view
         # construction (tests) on plain label IO semantics.
@@ -105,8 +111,19 @@ class DetectPoseView(TaskView):
         self._btn_keypoint.setCheckable(True)
         self._btn_keypoint.setToolTip("绘制关键点 (K)")
         set_button_role(self._btn_keypoint, "secondary")
+        self._btn_polygon = QPushButton(icon("polygon"), "多边形")
+        self._btn_polygon.setCheckable(True)
+        self._btn_polygon.setToolTip("绘制多边形 (P) — 逐点点击，双击或回车闭合，Esc 取消")
+        set_button_role(self._btn_polygon, "secondary")
+        self._btn_sam = QPushButton(icon("auto_label"), "SAM 辅助")
+        self._btn_sam.setCheckable(True)
+        self._btn_sam.setToolTip("SAM 辅助标注 — 单击或拉框自动生成多边形（CPU 推理）")
+        set_button_role(self._btn_sam, "secondary")
 
-        for btn in [self._btn_select, self._btn_bbox, self._btn_keypoint]:
+        for btn in [
+            self._btn_select, self._btn_bbox, self._btn_keypoint,
+            self._btn_polygon, self._btn_sam,
+        ]:
             btn.setMinimumWidth(80)
             self._toolbar.addWidget(btn)
 
@@ -160,10 +177,13 @@ class DetectPoseView(TaskView):
         self._btn_select.clicked.connect(lambda: self._set_tool("select"))
         self._btn_bbox.clicked.connect(lambda: self._set_tool("draw_bbox"))
         self._btn_keypoint.clicked.connect(lambda: self._set_tool("draw_keypoint"))
+        self._btn_polygon.clicked.connect(lambda: self._set_tool("draw_polygon"))
+        self._btn_sam.clicked.connect(lambda: self._set_tool("sam_prompt"))
 
         # File list
         self._file_list.image_selected.connect(self._on_image_selected)
         self._file_list.images_dropped.connect(self.images_dropped.emit)
+        self._file_list.videos_dropped.connect(self.videos_dropped.emit)
         self._file_list.batch_confirm_requested.connect(self._on_batch_confirm)
         self._file_list.batch_delete_requested.connect(self._on_batch_delete)
         self._file_list.delete_images_requested.connect(self._on_delete_images)
@@ -179,6 +199,8 @@ class DetectPoseView(TaskView):
         self._canvas.annotation_copied.connect(self._on_annotation_copied)
         self._canvas.keypoint_attach_requested.connect(self._on_keypoint_attach_requested)
         self._canvas.keypoint_selected.connect(self._ann_panel.select_keypoint)
+        self._canvas.sam_point_requested.connect(self._on_sam_point_requested)
+        self._canvas.sam_box_requested.connect(self._on_sam_box_requested)
 
         # Properties panel
         self._ann_panel.annotation_clicked.connect(self._canvas.select_annotation)
@@ -204,21 +226,34 @@ class DetectPoseView(TaskView):
 
         # Show drawing tools by task_type (pose hides keypoint button only via task_type="detect")
         self._btn_keypoint.setVisible(project.config.task_type == "pose")
+        self._btn_polygon.setVisible(project.config.task_type == "segment")
+        self._btn_sam.setVisible(project.config.task_type == "segment")
 
         images = project.list_images()
-        self._file_list.set_image_paths(images)
+        # Single label scan: one store.load per image feeds BOTH the file-list
+        # metadata maps and the project stats (previously two full passes, and
+        # per-image set_status was a linear row scan — O(n²) on project open).
+        statuses: dict[str, str] = {}
+        classes_map: dict[str, set[str]] = {}
+        tags_map: dict[str, set[str]] = {}
+        stats = self._new_stats(len(images))
         for img_path in images:
             label_path = project.label_path_for(img_path)
             ia = self._store.load(label_path)
             if ia:
-                self._file_list.set_status(img_path, ia.status)
-                classes_in_img = {a.class_name for a in ia.annotations}
-                self._file_list.set_image_classes(img_path, classes_in_img)
-                self._file_list.set_image_tags(img_path, set(ia.tags))
+                key = str(img_path)
+                statuses[key] = ia.status
+                classes_map[key] = {a.class_name for a in ia.annotations}
+                tags_map[key] = set(ia.tags)
+                self._accumulate_stats(stats, ia)
+        self._file_list.set_image_paths(
+            images, statuses=statuses, classes=classes_map, tags=tags_map
+        )
         if images:
             self._file_list.setCurrentRow(0)
         logger.info("DetectPoseView loaded: %s (%d images)", project.config.name, len(images))
-        self._init_stats_cache()
+        self._stats_cache = stats
+        self._ann_panel.set_project_stats(stats)
 
     def set_class_colors(self, colors: dict[str, str]) -> None:
         self._canvas.set_class_colors(colors)
@@ -325,7 +360,60 @@ class DetectPoseView(TaskView):
         self._btn_select.setChecked(mode == "select")
         self._btn_bbox.setChecked(mode == "draw_bbox")
         self._btn_keypoint.setChecked(mode == "draw_keypoint")
+        self._btn_polygon.setChecked(mode == "draw_polygon")
+        self._btn_sam.setChecked(mode == "sam_prompt")
         self._canvas.set_tool_mode(mode)
+        if mode == "sam_prompt":
+            self._activate_sam_tool()
+
+    def _is_segment(self) -> bool:
+        return self._project is not None and self._project.config.task_type == "segment"
+
+    # ── SAM assist (lazy controller, view-local collaborator) ──
+
+    def _ensure_sam_controller(self):
+        """Construct + wire the SamAssistController on first use.
+
+        Lazy on purpose: importing/constructing it costs nothing heavy (the
+        engine lazy-imports ultralytics inside ``load()``), but deferring
+        keeps non-segment sessions from even touching the module.
+        """
+        if self._sam_ctrl is None:
+            from src.controllers.sam_assist import SamAssistController
+
+            self._sam_ctrl = SamAssistController(parent=self)
+        if not self._sam_wired:
+            self._sam_ctrl.mask_ready.connect(self._on_sam_mask_ready)
+            self._sam_ctrl.status_message.connect(self.status_changed.emit)
+            self._sam_wired = True
+        return self._sam_ctrl
+
+    def _activate_sam_tool(self) -> None:
+        ctrl = self._ensure_sam_controller()
+        path = self._current_image_path
+        size = get_image_size(path) if path is not None else None
+        ctrl.activate(path, size)
+
+    def _on_sam_point_requested(self, x: float, y: float) -> None:
+        if self._sam_ctrl is not None:
+            self._sam_ctrl.request_point(x, y)
+
+    def _on_sam_box_requested(self, x1: float, y1: float, x2: float, y2: float) -> None:
+        if self._sam_ctrl is not None:
+            self._sam_ctrl.request_box(x1, y1, x2, y2)
+
+    def _on_sam_mask_ready(self, polygon, bbox) -> None:
+        """SAM produced a polygon: stage it as the canvas draft and reuse the
+        class-picker → create_polygon_from_draw flow (undo/auto-save ride the
+        existing annotation_created signals for free)."""
+        if self._canvas.tool_mode != "sam_prompt":
+            return  # user switched tools while the status was still fresh
+        self._canvas.begin_polygon_from_points(polygon)
+
+    def cleanup(self) -> None:
+        """Release view-held background resources (view teardown / app close)."""
+        if self._sam_ctrl is not None:
+            self._sam_ctrl.shutdown()
 
     # ── Image switching ────────────────────────────────────────
 
@@ -372,6 +460,11 @@ class DetectPoseView(TaskView):
             self._last_saved_record = self._record_snapshot(self._current_annotation)
 
         self.image_focus_changed.emit(path)
+
+        # SAM tool active: pre-encode the newly-focused image in the
+        # background so the first click doesn't stall.
+        if self._sam_ctrl is not None and self._canvas.tool_mode == "sam_prompt":
+            self._sam_ctrl.set_image(path, get_image_size(path))
 
     def _preload_neighbors(self, current: Path) -> None:
         if not self._project:
@@ -490,6 +583,14 @@ class DetectPoseView(TaskView):
             self._canvas.create_bbox_from_draw(cls_name, cls_id)
         elif self._canvas.tool_mode == "draw_keypoint":
             self._canvas.create_keypoint_at(cls_name, cls_id)
+        elif self._canvas.tool_mode == "draw_polygon":
+            self._canvas.create_polygon_from_draw(cls_name, cls_id)
+        elif self._canvas.tool_mode == "sam_prompt":
+            # SAM-assisted polygon: auto-sourced and unconfirmed, matching the
+            # auto-label lifecycle (dashed border until the user confirms).
+            self._canvas.create_polygon_from_draw(
+                cls_name, cls_id, source="auto", confirmed=False,
+            )
 
     def _on_default_class_changed(self, cls_name) -> None:
         """Class set/cleared via the right-side project class list.
@@ -629,30 +730,43 @@ class DetectPoseView(TaskView):
 
     # ── Stats ─────────────────────────────────────────────────
 
-    def _compute_project_stats(self) -> dict:
-        if not self._project:
-            return {}
-        stats = {
-            "total_images": 0,
+    @staticmethod
+    def _new_stats(total_images: int) -> dict:
+        return {
+            "total_images": total_images,
             "labeled_images": 0,
             "confirmed_images": 0,
             "total_annotations": 0,
             "class_counts": {},
         }
+
+    @staticmethod
+    def _accumulate_stats(stats: dict, ia) -> None:
+        """Fold one label record into a stats dict.
+
+        Single implementation shared by the set_project scan and
+        _compute_project_stats so the two paths can't drift.
+        """
+        if len(ia.annotations) == 0:
+            return
+        stats["labeled_images"] += 1
+        if all(a.confirmed for a in ia.annotations):
+            stats["confirmed_images"] += 1
+        for ann in ia.annotations:
+            stats["total_annotations"] += 1
+            stats["class_counts"][ann.class_name] = stats["class_counts"].get(ann.class_name, 0) + 1
+
+    def _compute_project_stats(self) -> dict:
+        if not self._project:
+            return {}
         images = self._project.list_images()
-        stats["total_images"] = len(images)
+        stats = self._new_stats(len(images))
         for img_path in images:
             label_path = self._project.label_path_for(img_path)
             ia = self._store.load(label_path)
-            if ia is None or len(ia.annotations) == 0:
+            if ia is None:
                 continue
-            stats["labeled_images"] += 1
-            all_confirmed = all(a.confirmed for a in ia.annotations)
-            if all_confirmed:
-                stats["confirmed_images"] += 1
-            for ann in ia.annotations:
-                stats["total_annotations"] += 1
-                stats["class_counts"][ann.class_name] = stats["class_counts"].get(ann.class_name, 0) + 1
+            self._accumulate_stats(stats, ia)
         return stats
 
     def _init_stats_cache(self) -> None:
@@ -787,6 +901,15 @@ class DetectPoseView(TaskView):
             self._set_tool("draw_bbox")
         elif key == Qt.Key_K:
             self._set_tool("draw_keypoint")
+        elif key == Qt.Key_P and self._is_segment():
+            self._set_tool("draw_polygon")
+        elif key in (Qt.Key_Return, Qt.Key_Enter) and self._canvas.tool_mode == "draw_polygon":
+            # Enter closes an in-progress polygon (fallback to the double-click
+            # gesture); only consumed while a draft is open.
+            if not self._canvas.finish_polygon():
+                super().keyPressEvent(event)
+        elif key == Qt.Key_Escape and self._canvas.tool_mode == "draw_polygon" and self._canvas.has_polygon_draft:
+            self._canvas.clear_draw_state()
         elif key == Qt.Key_V and not (mod & Qt.ControlModifier):
             self._set_tool("select")
         elif key == Qt.Key_D or key == Qt.Key_Right:

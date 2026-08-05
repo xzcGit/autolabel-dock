@@ -185,7 +185,11 @@ def get_import_registry() -> ImportRegistry:
 
 def _register_builtin_formats() -> None:
     """Register all built-in export and import formats."""
-    from src.core.formats.yolo import export_yolo_detection, import_yolo_for_project
+    from src.core.formats.yolo import (
+        export_yolo_detection,
+        export_yolo_segment,
+        import_yolo_for_project,
+    )
     from src.core.formats.coco import export_coco, import_coco
     from src.core.formats.labelme import export_labelme, import_labelme_records
     from src.core.formats.imagefolder import (
@@ -195,6 +199,7 @@ def _register_builtin_formats() -> None:
     )
 
     _registry.register("YOLO", "YOLO (txt)", export_yolo_detection, needs_classes=True)
+    _registry.register("YOLO-seg", "YOLO-seg (分割)", export_yolo_segment, needs_classes=True)
     _registry.register("COCO", "COCO (json)", export_coco, needs_classes=True, output_is_file=True)
     _registry.register("labelme", "labelme (json)", export_labelme, needs_classes=False)
     _registry.register(

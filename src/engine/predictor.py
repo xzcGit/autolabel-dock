@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 
 from src.core.annotation import Annotation, Keypoint
+from src.core.polygon import simplify_polygon
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,28 @@ class Predictor:
         if isinstance(names, (list, tuple)) and 0 <= cls_id < len(names):
             return str(names[cls_id])
         return str(cls_id)
+
+    @staticmethod
+    def _extract_polygon(
+        segments, i: int, image_size: tuple[int, int] | None = None,
+    ) -> list[list[float]] | None:
+        """Build a simplified normalized polygon for detection ``i``, or None.
+
+        ``segments`` is ``result.masks.xyn`` (list of (N, 2) contours, one per
+        box) or None (non-seg model / no masks). A degenerate mask contributes
+        an empty (0, 2) array — those and short (<3-vertex) contours yield None
+        so the annotation keeps only its bbox. Raw contours have hundreds of
+        points, so simplify before storing; ``image_size`` makes the DP run in
+        pixel space (normalized space distorts geometry on non-square images).
+        """
+        if segments is None or i >= len(segments):
+            return None
+        seg = segments[i]
+        if seg is None or len(seg) < 3:
+            return None
+        raw = [[float(x), float(y)] for x, y in seg]
+        simplified = simplify_polygon(raw, image_size=image_size)
+        return [[round(x, 6), round(y, 6)] for x, y in simplified]
 
     def predict(
         self,
@@ -201,6 +224,13 @@ class Predictor:
             return [], img_size
 
         has_kpts = result.keypoints is not None
+        # Segment masks: result.masks is a Masks (boxes[i] ↔ masks[i] one-to-one)
+        # or None (detect/pose model, or no detections). ``xyn`` is a list of
+        # normalized (N, 2) contours, one per detection. A degenerate mask
+        # yields an empty (0, 2) array — guarded below.
+        segments = None
+        if getattr(result, "masks", None) is not None:
+            segments = getattr(result.masks, "xyn", None)
 
         for i in range(len(boxes.cls)):
             cls_id = int(boxes.cls[i].item())
@@ -243,6 +273,7 @@ class Predictor:
                 class_id=resolved_id,
                 bbox=(cx, cy, bw, bh),
                 keypoints=keypoints,
+                polygon=self._extract_polygon(segments, i, img_size),
                 confidence=confidence,
                 confirmed=False,
                 source="auto",

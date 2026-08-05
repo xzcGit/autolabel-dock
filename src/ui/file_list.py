@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import QListWidget, QListWidgetItem, QMenu, QAction
 from PyQt5.QtCore import Qt, pyqtSignal, QUrl
 from PyQt5.QtGui import QColor, QDragEnterEvent, QDropEvent, QMouseEvent
 
-from src.core.project import IMAGE_EXTENSIONS
+from src.core.project import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 from src.core.tags import TagFilter
 from src.ui.theme import PALETTE
 
@@ -32,6 +32,8 @@ class FileListWidget(QListWidget):
     Signals:
         image_selected(Path): Emitted when user clicks a different image.
         images_dropped(list[Path]): Emitted when image files are dropped onto the list.
+        videos_dropped(list[Path]): Emitted when video files are dropped onto the list
+            (routed to the video-frame-import dialog; mixed drops emit both signals).
         batch_confirm_requested(list): Emitted with list of Paths to batch confirm.
         batch_delete_requested(list): Emitted with list of Paths to batch delete annotations.
         delete_images_requested(list): Emitted with list of Paths to delete (image file + label).
@@ -39,6 +41,7 @@ class FileListWidget(QListWidget):
 
     image_selected = pyqtSignal(object)  # Path
     images_dropped = pyqtSignal(list)    # list[Path]
+    videos_dropped = pyqtSignal(list)    # list[Path]
     batch_confirm_requested = pyqtSignal(list)   # list[Path]
     batch_delete_requested = pyqtSignal(list)    # list[Path]
     delete_images_requested = pyqtSignal(list)   # list[Path]
@@ -46,6 +49,7 @@ class FileListWidget(QListWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._paths: list[Path] = []
+        self._row_by_path: dict[str, int] = {}  # path_str -> row index
         self._statuses: dict[str, str] = {}  # path_str -> status
         self._image_classes: dict[str, set[str]] = {}  # path_str -> set of class names
         self._image_tags: dict[str, set[str]] = {}  # path_str -> set of user tags
@@ -102,43 +106,74 @@ class FileListWidget(QListWidget):
             super().dropEvent(event)
             return
         image_paths = []
+        video_paths = []
         for url in event.mimeData().urls():
             path = Path(url.toLocalFile())
             if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS:
                 image_paths.append(path)
+            elif path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS:
+                video_paths.append(path)
             elif path.is_dir():
                 for ext in IMAGE_EXTENSIONS:
                     image_paths.extend(path.glob(f"*{ext}"))
+                for ext in VIDEO_EXTENSIONS:
+                    video_paths.extend(path.glob(f"*{ext}"))
+        # Mixed drops route each kind independently: images take the existing
+        # copy path, videos open the frame-import dialog.
         if image_paths:
             self.images_dropped.emit(image_paths)
+        if video_paths:
+            self.videos_dropped.emit(video_paths)
         event.acceptProposedAction()
 
-    def set_image_paths(self, paths: list[Path]) -> None:
-        """Set the list of image paths to display."""
+    def set_image_paths(
+        self,
+        paths: list[Path],
+        *,
+        statuses: dict[str, str] | None = None,
+        classes: dict[str, set[str]] | None = None,
+        tags: dict[str, set[str]] | None = None,
+    ) -> None:
+        """Set the list of image paths to display.
+
+        The optional keyword maps bulk-replace the per-image metadata caches
+        atomically with the rebuild (project open passes all three from its
+        single label scan), so the whole population triggers exactly one
+        ``_apply_filter``. When omitted, existing caches are preserved
+        (``refresh_paths`` relies on this to keep statuses across a rescan).
+        """
+        if statuses is not None:
+            self._statuses = dict(statuses)
+        if classes is not None:
+            self._image_classes = {k: set(v) for k, v in classes.items()}
+        if tags is not None:
+            self._image_tags = {k: set(v) for k, v in tags.items()}
         self.blockSignals(True)
         self.clear()
         self._paths = list(paths)
-        for path in paths:
-            status = self._statuses.get(str(path), "unlabeled")
+        self._row_by_path = {}
+        for row, path in enumerate(paths):
+            path_str = str(path)
+            status = self._statuses.get(path_str, "unlabeled")
             icon = STATUS_ICONS.get(status, "○")
             item = QListWidgetItem(f"{icon} {path.name}")
-            item.setData(Qt.UserRole, str(path))
+            item.setData(Qt.UserRole, path_str)
             item.setForeground(QColor(STATUS_COLORS.get(status, PALETTE["text_subtle"])))
             self.addItem(item)
+            self._row_by_path[path_str] = row
         self._apply_filter()
         self.blockSignals(False)
 
     def set_status(self, path: Path, status: str) -> None:
         """Update the status of an image file."""
         self._statuses[str(path)] = status
-        # Update the item display
-        for i in range(self.count()):
-            item = self.item(i)
-            if item.data(Qt.UserRole) == str(path):
-                icon = STATUS_ICONS.get(status, "○")
-                item.setText(f"{icon} {path.name}")
-                item.setForeground(QColor(STATUS_COLORS.get(status, PALETTE["text_subtle"])))
-                break
+        # Update the item display (O(1) row lookup; unknown path = no-op)
+        row = self._row_by_path.get(str(path))
+        if row is not None:
+            item = self.item(row)
+            icon = STATUS_ICONS.get(status, "○")
+            item.setText(f"{icon} {path.name}")
+            item.setForeground(QColor(STATUS_COLORS.get(status, PALETTE["text_subtle"])))
 
     def set_filter(self, status: str | None) -> None:
         """Filter items by status. None shows all."""
@@ -182,16 +217,9 @@ class FileListWidget(QListWidget):
         ):
             return
         path_str = str(path)
-        for i in range(self.count()):
-            item = self.item(i)
-            if item.data(Qt.UserRole) == path_str:
-                item.setHidden(self._compute_hidden_for_path(path_str))
-                return
-
-    def set_all_image_tags(self, tag_map: dict[str, set[str]]) -> None:
-        """Bulk-replace the per-image tag cache (used on project open)."""
-        self._image_tags = {k: set(v) for k, v in tag_map.items()}
-        self._apply_filter()
+        row = self._row_by_path.get(path_str)
+        if row is not None:
+            self.item(row).setHidden(self._compute_hidden_for_path(path_str))
 
     def _apply_filter(self) -> None:
         """Apply current status and class filters to items.
@@ -296,10 +324,9 @@ class FileListWidget(QListWidget):
         self._paths = list(paths)
         self.set_image_paths(paths)
         if current:
-            for i in range(self.count()):
-                if self.item(i).data(Qt.UserRole) == str(current):
-                    self.setCurrentRow(i)
-                    break
+            row = self._row_by_path.get(str(current))
+            if row is not None:
+                self.setCurrentRow(row)
         self.verticalScrollBar().setValue(scroll_value)
 
     def get_paths(self) -> list[Path]:

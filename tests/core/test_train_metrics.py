@@ -124,11 +124,22 @@ class TestBuildQualitySeries:
 
 
 class TestTaskQualityMetrics:
-    def test_has_the_three_project_tasks(self):
-        assert set(TASK_QUALITY_METRICS) == {"detect", "pose", "classify"}
+    def test_has_the_four_project_tasks(self):
+        assert set(TASK_QUALITY_METRICS) == {"detect", "pose", "classify", "segment"}
 
     def test_entry_shape_is_title_and_specs(self):
         title, specs = TASK_QUALITY_METRICS["detect"]
         assert title == "mAP"
         assert specs[0][0] == "mAP50"
         assert "metrics/mAP50(B)" in specs[0][1]
+
+    def test_segment_quality_prefers_mask_variant(self):
+        title, specs = TASK_QUALITY_METRICS["segment"]
+        assert title == "mAP (Segment)"
+        # The primary segment curve reads the mask (M) key, not the box (B) key.
+        assert specs[0][1][0] == "metrics/mAP50(M)"
+
+    def test_segment_pick_metric_reads_mask_over_box(self):
+        _, specs = TASK_QUALITY_METRICS["segment"]
+        metrics = {"metrics/mAP50(M)": 0.8, "metrics/mAP50(B)": 0.3}
+        assert pick_metric(metrics, specs[0][1]) == 0.8

@@ -27,6 +27,11 @@ _SVGS: dict[str, str] = {
         '<line x1="2" y1="12" x2="9" y2="12"/>'
         '<line x1="15" y1="12" x2="22" y2="12"/></svg>'
     ),
+    "polygon": (
+        '<svg viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2"'
+        ' stroke-linecap="round" stroke-linejoin="round">'
+        '<polygon points="12 2 21 8 18 20 6 20 3 8"/></svg>'
+    ),
     # Actions
     "check_all": (
         '<svg viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2"'

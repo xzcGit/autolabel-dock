@@ -24,7 +24,7 @@ def resolve_detection_class_map(
 
     for image_annotation in image_annotations:
         for annotation in image_annotation.annotations:
-            if annotation.bbox is None:
+            if annotation.bbox is None and not annotation.polygon:
                 continue
             if only_confirmed and not annotation.confirmed:
                 continue
@@ -35,7 +35,7 @@ def resolve_detection_class_map(
 
     for image_annotation in image_annotations:
         for annotation in image_annotation.annotations:
-            if annotation.bbox is None:
+            if annotation.bbox is None and not annotation.polygon:
                 continue
             if only_confirmed and not annotation.confirmed:
                 continue

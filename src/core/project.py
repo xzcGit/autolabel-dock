@@ -13,6 +13,11 @@ logger = logging.getLogger(__name__)
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"}
 
+# Video containers recognized by the video-frame-import flow (file-list drop
+# + 文件 menu). Videos are never project data themselves — they get sampled
+# into plain JPEG frames under the project image dir (core/video_frames.py).
+VIDEO_EXTENSIONS = {".mp4", ".avi", ".mkv", ".mov"}
+
 
 @dataclass
 class ProjectConfig:
@@ -29,7 +34,7 @@ class ProjectConfig:
     auto_label_iou: float = 0.45
     created_at: str = ""
     version: str = "1.0"
-    task_type: str = "detect"  # "detect" | "pose" | "classify"
+    task_type: str = "detect"  # "detect" | "pose" | "classify" | "segment"
     auto_register_classes: bool = True
     # Project-level registry of known user tags. Per-image tag selections
     # live on ImageAnnotation.tags; this list is just the autocomplete source.
@@ -111,7 +116,7 @@ class ProjectManager:
             image_dir: Either a relative subdir name (created inside project_dir)
                        or an absolute path to an existing image directory.
             classes: Initial class list.
-            task_type: Task type - "detect", "pose", or "classify".
+            task_type: Task type - "detect", "pose", "classify", or "segment".
         """
         project_dir = Path(project_dir)
         project_dir.mkdir(parents=True, exist_ok=True)

@@ -102,6 +102,67 @@ class TestAnnotation:
         assert y + h / 2 <= 1.0
 
 
+class TestAnnotationPolygon:
+    """Segment polygon field: serialization, no-op compat, clamp/derived bbox."""
+
+    def test_polygon_defaults_to_none(self):
+        ann = Annotation(class_name="x", class_id=0, bbox=(0.5, 0.5, 0.2, 0.2))
+        assert ann.polygon is None
+        assert ann.to_dict()["polygon"] is None
+
+    def test_polygon_roundtrip(self):
+        poly = [[0.3, 0.3], [0.7, 0.3], [0.5, 0.7]]
+        ann = Annotation(
+            class_name="leaf", class_id=0,
+            bbox=(0.5, 0.5, 0.4, 0.4), polygon=poly,
+        )
+        d = ann.to_dict()
+        assert d["polygon"] == poly
+        restored = Annotation.from_dict(d)
+        assert restored.polygon == poly
+        assert restored.bbox == (0.5, 0.5, 0.4, 0.4)
+
+    def test_to_dict_polygon_is_fresh_list_no_alias(self):
+        """Undo/redo relies on to_dict being a deep copy — mutating the snapshot
+        must not leak into the live annotation."""
+        poly = [[0.3, 0.3], [0.7, 0.3], [0.5, 0.7]]
+        ann = Annotation(class_name="x", class_id=0, polygon=poly)
+        d = ann.to_dict()
+        d["polygon"][0][0] = 0.99
+        assert ann.polygon[0][0] == 0.3
+
+    def test_from_dict_legacy_json_without_polygon(self):
+        """Old label JSON (no 'polygon' key) loads with polygon=None."""
+        legacy = {
+            "id": "abc",
+            "class_name": "person",
+            "class_id": 0,
+            "bbox": [0.5, 0.5, 0.2, 0.2],
+            "keypoints": [],
+            "confidence": 1.0,
+            "confirmed": True,
+            "source": "manual",
+        }
+        ann = Annotation.from_dict(legacy)
+        assert ann.polygon is None
+
+    def test_clamp_recomputes_derived_bbox_from_polygon(self):
+        # Polygon exceeds bounds; clamp must clip vertices AND rebuild the bbox.
+        ann = Annotation(
+            class_name="x", class_id=0,
+            bbox=(0.5, 0.5, 0.4, 0.4),
+            polygon=[[-0.2, 0.1], [1.3, 0.1], [0.5, 0.9]],
+        )
+        ann.clamp()
+        assert ann.polygon == [[0.0, 0.1], [1.0, 0.1], [0.5, 0.9]]
+        # Derived bbox spans x∈[0,1], y∈[0.1,0.9]
+        cx, cy, w, h = ann.bbox
+        assert abs(cx - 0.5) < 1e-9
+        assert abs(w - 1.0) < 1e-9
+        assert abs(cy - 0.5) < 1e-9
+        assert abs(h - 0.8) < 1e-9
+
+
 class TestImageAnnotation:
     def test_create_empty(self):
         ia = ImageAnnotation(

@@ -64,7 +64,7 @@ def _format_train_params(params: dict, task: str) -> str:
         if items:
             sections.append((group_name, items))
 
-    if task == "detect" and params.get("include_detect_params"):
+    if task in ("detect", "segment") and params.get("include_detect_params"):
         items = [_format_param_value(k, params[k]) for k in _DETECT_AUG_KEYS if k in params]
         if items:
             sections.append(("Detect 增强", items))
@@ -261,6 +261,7 @@ class ModelPanel(QWidget):
             "detect": PALETTE["primary"],
             "classify": PALETTE["success"],
             "pose": PALETTE["violet"],
+            "segment": PALETTE["teal"],
         }
         for model in models:
             color = task_colors.get(model.task, PALETTE["text"])

@@ -465,3 +465,104 @@ class TestDatasetPreparer:
         cat_imgs = list((output_dir / "train" / "cat").iterdir())
         dog_imgs = list((output_dir / "train" / "dog").iterdir())
         assert len(cat_imgs) + len(dog_imgs) == 6
+
+
+class TestDatasetPreparerSegment:
+    """Segment export: pure-polygon rows, bbox→4-corner folding, no mixed rows."""
+
+    def _make_segment_project(self, tmp_path, annotations):
+        pm = ProjectManager.create(
+            project_dir=tmp_path / "proj",
+            name="test",
+            image_dir="images",
+            classes=["leaf"],
+            task_type="segment",
+        )
+        img_dir = tmp_path / "proj" / "images"
+        (img_dir / "seg.jpg").write_bytes(b"fake")
+        ia = ImageAnnotation(
+            image_path="seg.jpg",
+            image_size=(640, 480),
+            annotations=annotations,
+        )
+        save_annotation(ia, pm.label_path_for(img_dir / "seg.jpg"))
+        return pm
+
+    def test_segment_row_is_pure_polygon(self, tmp_path):
+        pm = self._make_segment_project(tmp_path, [
+            Annotation(
+                class_name="leaf", class_id=0,
+                bbox=(0.5, 0.5, 0.4, 0.4),
+                polygon=[[0.3, 0.3], [0.7, 0.3], [0.5, 0.7]],
+                confirmed=True,
+            ),
+        ])
+        output_dir = tmp_path / "dataset"
+        DatasetPreparer(pm).prepare(output_dir, task="segment", val_ratio=0.0)
+
+        line = (output_dir / "train" / "labels" / "seg.txt").read_text().strip()
+        parts = line.split()
+        # class + 3 points * 2 coords = 7 fields (NO bbox 4-field prefix)
+        assert len(parts) == 7
+        assert parts[0] == "0"
+        assert parts[1:] == ["0.300000", "0.300000", "0.700000", "0.300000", "0.500000", "0.700000"]
+
+    def test_bbox_only_annotation_folds_to_four_corners(self, tmp_path):
+        pm = self._make_segment_project(tmp_path, [
+            Annotation(
+                class_name="leaf", class_id=0,
+                bbox=(0.5, 0.5, 0.4, 0.2),  # no polygon
+                confirmed=True,
+            ),
+        ])
+        output_dir = tmp_path / "dataset"
+        DatasetPreparer(pm).prepare(output_dir, task="segment", val_ratio=0.0)
+
+        line = (output_dir / "train" / "labels" / "seg.txt").read_text().strip()
+        parts = line.split()
+        # class + 4 corners * 2 coords = 9 fields
+        assert len(parts) == 9
+        assert parts[0] == "0"
+
+    def test_no_five_field_rows_when_mixing_polygon_and_bbox(self, tmp_path):
+        """ultralytics reshapes any >6-field file as (-1, 2); a stray 5-field
+        bbox row would corrupt it. Every row must be class + even coords ≥ 6."""
+        pm = self._make_segment_project(tmp_path, [
+            Annotation(
+                class_name="leaf", class_id=0,
+                bbox=(0.5, 0.5, 0.4, 0.4),
+                polygon=[[0.3, 0.3], [0.7, 0.3], [0.5, 0.7]],
+                confirmed=True,
+            ),
+            Annotation(  # bbox-only — must be folded, not emitted as 5 fields
+                class_name="leaf", class_id=0,
+                bbox=(0.2, 0.2, 0.1, 0.1),
+                confirmed=True,
+            ),
+        ])
+        output_dir = tmp_path / "dataset"
+        DatasetPreparer(pm).prepare(output_dir, task="segment", val_ratio=0.0)
+
+        lines = (output_dir / "train" / "labels" / "seg.txt").read_text().strip().splitlines()
+        assert len(lines) == 2
+        for line in lines:
+            n = len(line.split())
+            assert n >= 7, f"row has only {n} fields (would be mis-parsed as pose/bbox)"
+            assert (n - 1) % 2 == 0, "coordinate count must be even (x,y pairs)"
+
+    def test_data_yaml_has_no_kpt_shape(self, tmp_path):
+        pm = self._make_segment_project(tmp_path, [
+            Annotation(
+                class_name="leaf", class_id=0,
+                bbox=(0.5, 0.5, 0.4, 0.4),
+                polygon=[[0.3, 0.3], [0.7, 0.3], [0.5, 0.7]],
+                confirmed=True,
+            ),
+        ])
+        output_dir = tmp_path / "dataset"
+        data_yaml = DatasetPreparer(pm).prepare(output_dir, task="segment", val_ratio=0.0)
+
+        data = yaml.safe_load(data_yaml.read_text())
+        assert data["names"] == ["leaf"]
+        assert data["nc"] == 1
+        assert "kpt_shape" not in data

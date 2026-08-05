@@ -180,7 +180,7 @@ class ModelController:
         name, ok = QInputDialog.getText(self._parent, "模型名称", "请输入模型名称:")
         if not ok or not name.strip():
             return None
-        tasks = ["detect", "classify", "pose"]
+        tasks = ["detect", "classify", "pose", "segment"]
         current_task = self._project.config.task_type if self._project else "detect"
         default_idx = tasks.index(current_task) if current_task in tasks else 0
         task, ok = QInputDialog.getItem(

@@ -36,6 +36,7 @@ from src.controllers.train import TrainController
 from src.controllers.tags import TagController
 from src.controllers.autolabel import AutoLabelController
 from src.controllers.locateanything import LocateAnythingController
+from src.controllers.video_import import VideoImportController
 from src.core.train_templates import TemplateRegistry
 from src.ui.icons import icon
 from src.ui.tag_widget import TagManagerDialog
@@ -175,6 +176,10 @@ class MainWindow(QMainWindow):
             params_provider=self._collect_inference_params,
             parent_widget=self,
         )
+        # Video frame import — dialog-driven extraction into the project image
+        # dir. MainWindow keeps only the progress-dialog shell (below); the
+        # worker lifecycle lives in the controller.
+        self._video_import_ctrl = VideoImportController(self)
 
         # Global template registry — shared across projects
         self._template_registry = TemplateRegistry(TEMPLATES_PATH)
@@ -190,6 +195,8 @@ class MainWindow(QMainWindow):
         # Progress-dialog shell for batch auto-label (workers/counters live in
         # AutoLabelController; only the dialog belongs to the window).
         self._batch_dialog: BatchProgressDialog | None = None
+        # Progress-dialog shell for video frame import (same pattern).
+        self._video_progress_dialog: BatchProgressDialog | None = None
 
         # Central widget
         self.tab_widget = QTabWidget()
@@ -218,6 +225,12 @@ class MainWindow(QMainWindow):
         self._autolabel_ctrl.classes_registered.connect(
             self._on_autolabel_classes_registered
         )
+        # VideoImportController signal wiring (needs the status label above).
+        self._video_import_ctrl.started.connect(self._on_video_import_started)
+        self._video_import_ctrl.progress.connect(self._on_video_import_progress)
+        self._video_import_ctrl.video_progress.connect(self._on_video_import_detail)
+        self._video_import_ctrl.finished.connect(self._on_video_import_finished)
+        self._video_import_ctrl.error.connect(self._on_video_import_error)
 
         self.tab_widget.currentChanged.connect(self._on_tab_changed)
 
@@ -256,6 +269,10 @@ class MainWindow(QMainWindow):
         import_action.setShortcut("Ctrl+I")
         import_action.triggered.connect(self._on_import)
         file_menu.addAction(import_action)
+
+        video_import_action = QAction(icon("import"), "导入视频帧...", self)
+        video_import_action.triggered.connect(self._on_import_video_frames)
+        file_menu.addAction(video_import_action)
 
         file_menu.addSeparator()
 
@@ -323,6 +340,7 @@ class MainWindow(QMainWindow):
             self._label_panel.la_enable_requested.connect(self._on_la_enable_requested)
             self._label_panel.la_disable_requested.connect(self._la_ctrl.disable)
             self._label_panel.la_query_changed.connect(self._la_ctrl.set_query)
+            self._label_panel.videos_dropped.connect(self._on_videos_dropped)
             # Experimental master switch: fully hide the LA bar when disabled.
             self._label_panel.set_la_feature_visible(
                 self._app_config.enable_locateanything
@@ -438,6 +456,74 @@ class MainWindow(QMainWindow):
             self._status_label.setText(f"导入完成: {count} 个图片")
         elif count == 0:
             self._status_label.setText("导入完成: 无匹配图片")
+
+    # ── Video frame import (dialog + progress-dialog shell) ────
+    # Extraction runs in VideoImportController; MainWindow opens the dialog,
+    # resolves the project image dir (ProjectManager.list_images semantics),
+    # hosts the modal progress dialog, and rescans the file list on finish.
+
+    def _on_import_video_frames(self) -> None:
+        """文件 menu「导入视频帧...」: open the dialog with no pre-filled videos."""
+        self._open_video_import_dialog(initial_videos=None)
+
+    def _on_videos_dropped(self, paths: list) -> None:
+        """Videos dropped onto the file list → dialog pre-filled with them."""
+        self._open_video_import_dialog(initial_videos=[Path(p) for p in paths])
+
+    def _open_video_import_dialog(self, initial_videos) -> None:
+        if not self._project:
+            return
+        if self._video_import_ctrl.is_running:
+            QMessageBox.information(self, "提示", "视频抽帧正在进行，请稍候。")
+            return
+        from src.ui.video_import_dialog import VideoImportDialog
+
+        dlg = VideoImportDialog(self, initial_videos=initial_videos)
+        if not dlg.exec_():
+            return
+        videos = dlg.get_videos()
+        if not videos:
+            return
+        self._video_import_ctrl.start_import(
+            videos, self._project_image_dir(), dlg.get_params(),
+        )
+
+    def _project_image_dir(self) -> Path:
+        """Resolve the project image dir (relative-or-absolute, matching
+        ProjectManager.list_images)."""
+        img_dir = Path(self._project.config.image_dir)
+        if not img_dir.is_absolute():
+            img_dir = self._project.project_dir / img_dir
+        return img_dir
+
+    def _on_video_import_started(self, total: int) -> None:
+        self._video_progress_dialog = BatchProgressDialog("导入视频帧", total, self)
+        self._video_progress_dialog.cancelled.connect(self._video_import_ctrl.cancel)
+        self._video_progress_dialog.show()
+
+    def _on_video_import_progress(self, current: int, total: int) -> None:
+        if self._video_progress_dialog:
+            self._video_progress_dialog.update_progress(current, total)
+
+    def _on_video_import_detail(self, name: str, written: int, skipped: int) -> None:
+        if self._video_progress_dialog:
+            self._video_progress_dialog.set_detail(
+                f"{name}: 已写入 {written} / 跳过 {skipped}"
+            )
+
+    def _on_video_import_finished(self, summary: str) -> None:
+        """Terminal for every outcome (completed / failed / cancelled)."""
+        if self._video_progress_dialog:
+            self._video_progress_dialog.close()
+            self._video_progress_dialog = None
+        self._status_label.setText(summary)
+        # New frames are plain images — rescan the file list (F5 path). No
+        # label records were touched, so this needs no Supersede flush/reload.
+        if self._label_panel:
+            self._label_panel.rescan_images()
+
+    def _on_video_import_error(self, message: str) -> None:
+        QMessageBox.warning(self, "视频抽帧失败", message)
 
     def _on_class_manager(self) -> None:
         if not self._project:
@@ -869,6 +955,9 @@ class MainWindow(QMainWindow):
         # Wait for any in-flight single-image inference (slow backend) so the
         # worker isn't using the predictor while we release it below.
         self._autolabel_ctrl.shutdown(30000)
+        # Stop any in-flight video frame extraction (cancel is checked per
+        # frame, so this returns quickly; written frames stay on disk).
+        self._video_import_ctrl.shutdown(30000)
         # Free the LocateAnything runtime (GPU model) if it is still resident.
         if self._la_ctrl.is_active:
             self._la_ctrl.disable()
@@ -876,6 +965,8 @@ class MainWindow(QMainWindow):
             # Keep this explicit flush: persist pending edits before exit —
             # no store-mediated read runs after this point.
             self._label_panel.save_and_cleanup()
+            # Release view-held background workers (SAM assist / thumbnails).
+            self._label_panel.shutdown_view()
         geo = self.geometry()
         self._app_config.window_geometry = {
             "x": geo.x(), "y": geo.y(),

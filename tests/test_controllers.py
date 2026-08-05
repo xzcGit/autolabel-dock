@@ -737,7 +737,7 @@ class TestModelController:
             "src.controllers.model.QInputDialog.getItem", fake_get_item
         )
 
-        for project_task, expected_idx in [("detect", 0), ("classify", 1), ("pose", 2)]:
+        for project_task, expected_idx in [("detect", 0), ("classify", 1), ("pose", 2), ("segment", 3)]:
             project_dir = tmp_path / f"proj_{project_task}"
             pm = ProjectManager.create(
                 project_dir, f"p_{project_task}",
@@ -755,7 +755,7 @@ class TestModelController:
             assert imported.backend_id == DEFAULT_BACKEND_ID
             assert imported.model_format == "pt"
             assert imported.backend_runtime == DEFAULT_BACKEND_RUNTIME
-            assert captured["items"] == ["detect", "classify", "pose"]
+            assert captured["items"] == ["detect", "classify", "pose", "segment"]
             assert captured["current"] == expected_idx, (
                 f"task={project_task}: expected default_idx={expected_idx}, got {captured['current']}"
             )

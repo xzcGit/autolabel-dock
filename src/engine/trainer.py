@@ -21,7 +21,7 @@ class TrainConfig:
 
     data_yaml: str
     model: str
-    task: str  # "detect", "classify", "pose"
+    task: str  # "detect", "classify", "pose", "segment"
 
     # Basic hyperparameters
     epochs: int = 100
@@ -238,6 +238,12 @@ class Trainer:
 
         result = {}
         for key, value in raw.items():
+            # Strip the metrics/ prefix and the box/pose suffixes so detect/pose
+            # register clean names (mAP50, mAP50-95). The segment mask suffix
+            # "(M)" is DELIBERATELY preserved: a segment run emits both (B) and
+            # (M) variants, and stripping (M) too would collapse mAP50(M) onto
+            # mAP50(B) — the two would overwrite each other. So box→clean name,
+            # mask→keeps its (M) suffix, both survive.
             clean_key = key.replace("metrics/", "").replace("(B)", "").replace("(P)", "")
             result[clean_key] = round(float(value), 4)
         return result

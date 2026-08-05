@@ -62,6 +62,9 @@ class LabelPanel(QWidget):
     la_enable_requested = pyqtSignal()
     la_disable_requested = pyqtSignal()
     la_query_changed = pyqtSignal(str, object)  # (prompt, target_class | None)
+    # Video files dropped onto the active view's file list — forwarded to
+    # MainWindow, which owns the video-import dialog + controller.
+    videos_dropped = pyqtSignal(list)  # list[Path]
 
     _UNDO_MAX_IMAGES = 20
 
@@ -253,6 +256,7 @@ class LabelPanel(QWidget):
         # Wire view → shell signals
         self._view.status_changed.connect(self.status_changed.emit)
         self._view.images_dropped.connect(self._on_images_dropped)
+        self._view.videos_dropped.connect(self.videos_dropped.emit)
         self._view.classes_changed.connect(self._on_view_classes_changed)
         self._view.user_tags_changed.connect(self._on_view_user_tags_changed)
 
@@ -311,6 +315,16 @@ class LabelPanel(QWidget):
     def save_and_cleanup(self) -> None:
         if self._view:
             self._view.commit_pending_save()
+
+    def shutdown_view(self) -> None:
+        """Release the active view's background resources (app close).
+
+        Delegates to the TaskView ``cleanup()`` optional override (thumbnail
+        loader for classify, SAM assist worker for detect/pose). Idempotent —
+        ``set_project`` also calls cleanup on view swaps.
+        """
+        if self._view:
+            self._view.cleanup()
 
     # ── AnnotationPanel state persistence ──────────────────────
 
