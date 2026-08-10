@@ -6,29 +6,29 @@ from collections import deque
 from pathlib import Path
 
 from PyQt5.QtCore import Qt, QMutex, QSize, QThread, pyqtSignal
-from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtGui import QImage
 
 logger = logging.getLogger(__name__)
 
 
-def _default_load_pixmap(path: Path, size: QSize) -> QPixmap | None:
+def _default_load_image(path: Path, size: QSize) -> QImage | None:
+    # QImage only — QPixmap must not be created outside the GUI thread.
     img = QImage(str(path))
     if img.isNull():
         return None
-    scaled = img.scaled(
+    return img.scaled(
         size.width(), size.height(), Qt.KeepAspectRatio, Qt.SmoothTransformation,
     )
-    return QPixmap.fromImage(scaled)
 
 
 class ThumbnailLoader(QThread):
-    """Background loader. Emits (path, pixmap) for each completed item."""
+    """Background loader. Emits (path, image) for each completed item."""
 
-    loaded = pyqtSignal(object, object)  # Path, QPixmap
+    loaded = pyqtSignal(object, object)  # Path, QImage
 
     def __init__(self, loader_fn=None, parent=None):
         super().__init__(parent)
-        self._loader_fn = loader_fn or _default_load_pixmap
+        self._loader_fn = loader_fn or _default_load_image
         self._queue: deque[tuple[Path, QSize]] = deque()
         self._mu = QMutex()
         self._stop = False
@@ -55,9 +55,9 @@ class ThumbnailLoader(QThread):
             finally:
                 self._mu.unlock()
             try:
-                pix = self._loader_fn(path, size)
+                img = self._loader_fn(path, size)
             except Exception as e:
                 logger.warning("Thumbnail load failed for %s: %s", path, e)
-                pix = None
-            if pix is not None:
-                self.loaded.emit(path, pix)
+                img = None
+            if img is not None:
+                self.loaded.emit(path, img)

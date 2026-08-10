@@ -412,3 +412,45 @@ class TestTrainer:
         events_registered = list(callbacks.keys())
         assert "on_train_batch_end" in events_registered
         assert "on_fit_epoch_end" in events_registered
+
+    def test_cancel_during_validation_sets_stop_flag(self):
+        """Cancel arriving during validation/save (no batch callback firing)
+        must exit via the fit-epoch fallback. Ultralytics' loop is
+        `while True: ... if self.stop: break` with a *local* epoch counter,
+        so the fallback must set `stop = True` — assigning `epoch` does
+        nothing (and corrupts checkpoint metadata)."""
+        mock_yolo_cls = MagicMock()
+        mock_model = MagicMock()
+        mock_yolo_cls.return_value = mock_model
+
+        callbacks: dict[str, list] = {}
+        mock_model.add_callback.side_effect = (
+            lambda event, fn: callbacks.setdefault(event, []).append(fn)
+        )
+
+        class FakeUltTrainer:
+            def __init__(self):
+                self.stop = False
+                self.epoch = 3
+                self.epochs = 100
+                self.metrics = {}
+                self.loss = None
+
+        ult_trainer = FakeUltTrainer()
+
+        def fake_train(**_kwargs):
+            # Cancel lands while ultralytics is validating; the next callback
+            # to fire is on_fit_epoch_end.
+            trainer.request_cancel()
+            for cb in callbacks["on_fit_epoch_end"]:
+                cb(ult_trainer)
+
+        mock_model.train.side_effect = fake_train
+
+        cfg = TrainConfig(data_yaml="/data.yaml", model="yolov8n.pt", task="detect")
+        trainer = Trainer(yolo_cls=mock_yolo_cls)
+        trainer.train(cfg)
+
+        assert ult_trainer.stop is True
+        assert ult_trainer.epoch == 3  # untouched — no checkpoint-metadata corruption
+        assert trainer.cancelled is True

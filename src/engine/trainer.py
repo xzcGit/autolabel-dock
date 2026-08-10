@@ -203,7 +203,10 @@ class Trainer:
             if self._cancel_requested:
                 # Fallback: if cancel arrives during validation/save (when no
                 # batch callback fires), force the outer epoch loop to exit.
-                trainer_obj.epoch = trainer_obj.epochs
+                # Ultralytics' loop is `while True: ... if self.stop: break`
+                # with a *local* epoch counter, so `stop` is the only working
+                # exit lever (assigning trainer_obj.epoch does nothing).
+                trainer_obj.stop = True
                 return
             if on_epoch_end:
                 metrics = {}

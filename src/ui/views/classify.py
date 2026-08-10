@@ -282,6 +282,9 @@ class PreviewPane(QFrame):
         self._store = label_store or LabelStore()
         self._project: ProjectManager | None = None
         self._current_path: Path | None = None
+        # Full-size pixmap of the current image; rescaled to the label on
+        # resize/show so a hidden or mid-layout pane never bakes in a tiny size.
+        self._orig_pixmap: QPixmap | None = None
         self._init_ui()
 
     def _init_ui(self) -> None:
@@ -336,6 +339,7 @@ class PreviewPane(QFrame):
     def set_image(self, path: Path | None) -> None:
         self._current_path = path
         if path is None:
+            self._orig_pixmap = None
             self._filename_lbl.setText("—")
             self._image_lbl.clear()
             self._meta_lbl.setText("—")
@@ -345,12 +349,10 @@ class PreviewPane(QFrame):
         if pix is None:
             pix = load_pixmap(path)
         if pix is not None and not pix.isNull():
-            scaled = pix.scaled(
-                self._image_lbl.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation,
-            )
-            self._image_lbl.setPixmap(scaled)
+            self._orig_pixmap = pix
         else:
-            self._image_lbl.clear()
+            self._orig_pixmap = None
+        self._update_scaled_pixmap()
         ia = (
             self._store.load(self._project.label_path_for(path))
             if self._project is not None
@@ -370,6 +372,27 @@ class PreviewPane(QFrame):
             self._tag_bar.set_tags(list(ia.tags) if ia is not None else [])
         finally:
             self._tag_bar.blockSignals(False)
+
+    def _update_scaled_pixmap(self) -> None:
+        if self._orig_pixmap is None:
+            self._image_lbl.clear()
+            return
+        size = self._image_lbl.size()
+        if size.width() < 2 or size.height() < 2:
+            # Layout not settled yet (pane hidden or freshly shown) —
+            # showEvent/resizeEvent will rescale once the size is real.
+            return
+        self._image_lbl.setPixmap(
+            self._orig_pixmap.scaled(size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        )
+
+    def resizeEvent(self, event):  # noqa: N802 (Qt naming)
+        super().resizeEvent(event)
+        self._update_scaled_pixmap()
+
+    def showEvent(self, event):  # noqa: N802 (Qt naming)
+        super().showEvent(event)
+        self._update_scaled_pixmap()
 
 
 # ── Class button bar ───────────────────────────────────────────
@@ -859,8 +882,10 @@ class ClassifyView(TaskView):
         )
         logger.info("Deleted %d images, %d labels", img_n, lbl_n)
 
-    def _on_thumbnail_loaded(self, path: Path, pixmap: QPixmap) -> None:
-        self._grid.update_thumbnail(path, pixmap)
+    def _on_thumbnail_loaded(self, path: Path, image) -> None:
+        # QPixmap conversion happens here, on the GUI thread — the loader
+        # thread ships QImage only (QPixmap is GUI-thread-only in Qt).
+        self._grid.update_thumbnail(path, QPixmap.fromImage(image))
 
     def set_class_colors(self, colors: dict[str, str]) -> None:
         self._class_colors = dict(colors)

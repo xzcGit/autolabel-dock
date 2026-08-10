@@ -39,11 +39,17 @@ class TrainWorker(QThread):
         self._trainer_cls = trainer_cls
         self._trainer: TrainerProtocol | None = None
         self._trainer_mutex = QMutex()
+        self._cancel_requested = False
 
     def cancel(self) -> None:
         """Request graceful cancellation of training."""
         self._trainer_mutex.lock()
         try:
+            # Remember the request even when the trainer doesn't exist yet:
+            # creating it (first `from ultralytics import YOLO`) takes seconds,
+            # and a cancel landing in that window must not be lost — the stop
+            # button is already disabled, so the user can't click again.
+            self._cancel_requested = True
             if self._trainer:
                 self._trainer.request_cancel()
         finally:
@@ -59,6 +65,8 @@ class TrainWorker(QThread):
             self._trainer_mutex.lock()
             try:
                 self._trainer = trainer
+                if self._cancel_requested:
+                    trainer.request_cancel()
             finally:
                 self._trainer_mutex.unlock()
             trainer.train(self._config, on_epoch_end=self._on_epoch)

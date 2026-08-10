@@ -1426,3 +1426,76 @@ def test_thumbnail_grid_remove_path_drops_item_and_index(qapp, tmp_path):
         assert grid.item_for_path(paths[2]) is not None
     finally:
         grid.deleteLater()
+
+
+# ── PreviewPane deferred-rescale fix ───────────────────────────
+
+
+def test_preview_pane_rescales_when_size_becomes_real(qapp, tmp_path):
+    """set_image while the pane is tiny/unlaid-out must not bake in the tiny
+    size — once the pane gets a real size, the pixmap follows.
+
+    Regression: preview sometimes showed blank/minuscule images when the
+    focused image changed before layout settled or while the pane was hidden.
+    """
+    from PyQt5.QtGui import QImage
+    from src.ui.views.classify import PreviewPane
+    from src.utils.image import ImageCache
+
+    img_path = tmp_path / "big.png"
+    QImage(400, 300, QImage.Format_RGB32).save(str(img_path), "PNG")
+
+    pane = PreviewPane(ImageCache())
+    try:
+        # No layout yet — label size is the Qt default, not the real one.
+        pane.set_image(img_path)
+        assert pane._orig_pixmap is not None
+
+        pane.resize(500, 500)
+        pane.show()
+        qapp.processEvents()
+
+        pm = pane._image_lbl.pixmap()
+        assert pm is not None and not pm.isNull()
+        label = pane._image_lbl.size()
+        # Scaled to (roughly) fill the now-real label, aspect kept.
+        assert pm.width() == label.width() or pm.height() == label.height()
+    finally:
+        pane.deleteLater()
+
+
+def test_preview_pane_resize_rescales_pixmap(qapp, tmp_path):
+    from PyQt5.QtGui import QImage
+    from src.ui.views.classify import PreviewPane
+    from src.utils.image import ImageCache
+
+    img_path = tmp_path / "img.png"
+    QImage(400, 300, QImage.Format_RGB32).save(str(img_path), "PNG")
+
+    pane = PreviewPane(ImageCache())
+    try:
+        pane.resize(300, 300)
+        pane.show()
+        qapp.processEvents()
+        pane.set_image(img_path)
+        before = pane._image_lbl.pixmap().size()
+
+        pane.resize(600, 600)
+        qapp.processEvents()
+        after = pane._image_lbl.pixmap().size()
+        assert after.width() > before.width()
+    finally:
+        pane.deleteLater()
+
+
+def test_preview_pane_clear_resets_original_pixmap(qapp, tmp_path):
+    from src.ui.views.classify import PreviewPane
+    from src.utils.image import ImageCache
+
+    pane = PreviewPane(ImageCache())
+    try:
+        pane.set_image(None)
+        assert pane._orig_pixmap is None
+        assert pane._image_lbl.pixmap() is None or pane._image_lbl.pixmap().isNull()
+    finally:
+        pane.deleteLater()

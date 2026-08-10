@@ -64,6 +64,35 @@ class TestTrainWorker:
         assert len(errors) == 1
         assert "CUDA OOM" in errors[0]
 
+    def test_cancel_before_trainer_created_is_not_lost(self, qapp):
+        """A cancel arriving before run() has built the trainer (the multi-
+        second `from ultralytics import YOLO` window) must be remembered and
+        forwarded once the trainer exists — the stop button is already
+        disabled by then, so a lost cancel means the run goes to completion."""
+        from src.utils.workers import TrainWorker
+        from src.engine.trainer import TrainConfig
+
+        config = TrainConfig(data_yaml="data.yaml", model="yolov8n.pt", task="detect")
+        mock_trainer_cls = MagicMock()
+        mock_trainer_instance = MagicMock()
+        mock_trainer_instance.cancelled = True
+
+        def slow_create():
+            # Cancel already happened by the time the trainer exists.
+            return mock_trainer_instance
+
+        mock_trainer_cls.side_effect = slow_create
+
+        worker = TrainWorker(config, trainer_cls=mock_trainer_cls)
+        cancelled_signals = []
+        worker.cancelled.connect(lambda: cancelled_signals.append(True))
+
+        worker.cancel()  # trainer does not exist yet
+        worker.run()
+
+        mock_trainer_instance.request_cancel.assert_called()
+        assert len(cancelled_signals) == 1
+
     def test_releases_trainer_after_success(self, qapp):
         """After successful training, worker must drop its Trainer reference
         so the underlying YOLO model and DataLoader workers can be GC'd."""
