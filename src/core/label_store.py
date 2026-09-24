@@ -64,6 +64,15 @@ class LabelStore:
         self._flush()
         return label_io.load_annotation(label_path)
 
+    def load_unflushed(self, label_path: Path | str) -> ImageAnnotation | None:
+        """Load WITHOUT flushing — safe off the GUI thread.
+
+        The flush callback touches Qt widgets, so a worker thread must never
+        trigger it. Callers must guarantee a GUI-thread flush already happened
+        (e.g. project open, after ``LabelPanel.set_project`` flushed).
+        """
+        return label_io.load_annotation(label_path)
+
     def load_or_empty(
         self,
         label_path: Path | str,

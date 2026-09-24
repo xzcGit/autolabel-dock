@@ -7,6 +7,7 @@ dictionary so view switches preserve cache reuse but per-view undo state.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 from collections import OrderedDict
 from pathlib import Path
@@ -83,6 +84,7 @@ class DetectPoseView(TaskView):
         # idempotent when clean — store reads in scan loops trigger it once
         # per image). None means "unknown → must write".
         self._last_saved_record: dict | None = None
+        self._scan_worker = None
 
         self._init_ui()
         self._connect_signals()
@@ -230,28 +232,50 @@ class DetectPoseView(TaskView):
         self._btn_sam.setVisible(project.config.task_type == "segment")
 
         images = project.list_images()
-        # Single label scan: one store.load per image feeds BOTH the file-list
-        # metadata maps and the project stats (previously two full passes, and
-        # per-image set_status was a linear row scan — O(n²) on project open).
-        statuses: dict[str, str] = {}
-        classes_map: dict[str, set[str]] = {}
-        tags_map: dict[str, set[str]] = {}
-        stats = self._new_stats(len(images))
-        for img_path in images:
-            label_path = project.label_path_for(img_path)
-            ia = self._store.load(label_path)
-            if ia:
-                key = str(img_path)
-                statuses[key] = ia.status
-                classes_map[key] = {a.class_name for a in ia.annotations}
-                tags_map[key] = set(ia.tags)
-                self._accumulate_stats(stats, ia)
-        self._file_list.set_image_paths(
-            images, statuses=statuses, classes=classes_map, tags=tags_map
-        )
+        # Populate the file list immediately so project open never blocks on
+        # label IO; per-image statuses/classes/tags arrive when the
+        # background scan finishes (large projects: thousands of JSON reads).
+        # Empty maps reset caches left over from a previous project.
+        self._file_list.set_image_paths(images, statuses={}, classes={}, tags={})
         if images:
             self._file_list.setCurrentRow(0)
+        stats = self._new_stats(len(images))
+        self._stats_cache = stats
+        self._ann_panel.set_project_stats(stats)
+        self._start_label_scan(project)
         logger.info("DetectPoseView loaded: %s (%d images)", project.config.name, len(images))
+
+    # ── Background label scan (project open) ───────────────────
+
+    def _start_label_scan(self, project: ProjectManager) -> None:
+        self._stop_label_scan()
+        from src.ui.views.label_scan_worker import LabelScanWorker, scan_labels
+        # No flush here: LabelPanel.set_project flushed before building this
+        # view, and the flush callback touches Qt widgets (never off-thread).
+        if os.environ.get("AUTOLABEL_SYNC_SCAN"):  # test seam: deterministic tests
+            self._on_label_scan_finished(*scan_labels(project, self._store.load_unflushed))
+            return
+        worker = LabelScanWorker(project, self._store.load_unflushed, self)
+        worker.scan_done.connect(self._on_label_scan_finished)
+        self._scan_worker = worker
+        worker.start()
+
+    def _stop_label_scan(self) -> None:
+        if self._scan_worker is not None:
+            self._scan_worker.stop()
+            self._scan_worker.wait(2000)
+            self._scan_worker = None
+
+    def _on_label_scan_finished(self, project, statuses, classes, tags, records) -> None:
+        # Ignore a stale scan that outlived a project switch/teardown.
+        if project is not self._project:
+            return
+        # Merge in place: keeps the current row, and edits made while the
+        # scan ran win over its older snapshot.
+        self._file_list.merge_metadata(statuses, classes, tags)
+        stats = self._new_stats(len(project.list_images()))
+        for ia in records.values():
+            self._accumulate_stats(stats, ia)
         self._stats_cache = stats
         self._ann_panel.set_project_stats(stats)
 
@@ -412,6 +436,7 @@ class DetectPoseView(TaskView):
 
     def cleanup(self) -> None:
         """Release view-held background resources (view teardown / app close)."""
+        self._stop_label_scan()
         if self._sam_ctrl is not None:
             self._sam_ctrl.shutdown()
 

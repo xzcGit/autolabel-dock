@@ -403,9 +403,10 @@ class MainWindow(QMainWindow):
         self._train_panel.set_registered_models(self._model_registry.list_models())
 
         self.tab_widget.setCurrentWidget(self._label_panel)
+        n_images = len(project_manager.list_images())
         self._status_label.setText(
             f"项目: {project_manager.config.name} | "
-            f"图片: {len(project_manager.list_images())} | "
+            f"图片: {n_images} | "
             f"类别: {len(project_manager.config.classes)}"
         )
 
@@ -965,8 +966,13 @@ class MainWindow(QMainWindow):
             # Keep this explicit flush: persist pending edits before exit —
             # no store-mediated read runs after this point.
             self._label_panel.save_and_cleanup()
-            # Release view-held background workers (SAM assist / thumbnails).
+            # Release view-held background workers (SAM assist / thumbnails /
+            # label scan) so they never outlive their owning widgets.
             self._label_panel.shutdown_view()
+        if self._train_panel is not None:
+            # Wait out the async device probe while the panel is still alive
+            # (a straggling QThread aborts process teardown on quick exits).
+            self._train_panel.shutdown()
         geo = self.geometry()
         self._app_config.window_geometry = {
             "x": geo.x(), "y": geo.y(),

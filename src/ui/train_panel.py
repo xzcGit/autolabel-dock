@@ -25,7 +25,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QSizePolicy,
 )
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
 
 from src.engine.trainer import (
     DEFAULT_ERASING,
@@ -73,6 +73,20 @@ def _detect_available_devices() -> list[str]:
             devices.append("mps")
     devices.append("cpu")
     return devices
+
+
+class _DeviceDetectWorker(QThread):
+    """Probe for accelerators off the GUI thread.
+
+    Importing torch + initializing CUDA takes several seconds; doing it in
+    ``TrainPanel.__init__`` froze project-open (the panel is built lazily the
+    first time a project loads), leaving the whole window unresponsive.
+    """
+
+    detected = pyqtSignal(list)
+
+    def run(self) -> None:
+        self.detected.emit(_detect_available_devices())
 
 
 # Default pretrained models per task
@@ -157,8 +171,13 @@ class TrainPanel(QWidget):
 
         self._device_combo = QComboBox()
         self._device_combo.setEditable(True)
-        self._device_combo.addItems(_detect_available_devices())
+        # Placeholder set — real probing is async so project open never blocks
+        # on the multi-second torch import (see _DeviceDetectWorker).
+        self._device_combo.addItems(["auto", "cpu"])
         task_form.addRow("设备:", self._device_combo)
+        self._device_worker = _DeviceDetectWorker(self)
+        self._device_worker.detected.connect(self._on_devices_detected)
+        self._device_worker.start()
 
         self._preset_combo = QComboBox()
         self._preset_combo.addItems(list(TRAIN_PRESETS.keys()))
@@ -665,6 +684,24 @@ class TrainPanel(QWidget):
             event.ignore()
             return True
         return super().eventFilter(obj, event)
+
+    def shutdown(self, timeout_ms: int = 10000) -> None:
+        """Join the device-probe worker before panel destruction.
+
+        Called from MainWindow.closeEvent — the async torch import can still
+        be mid-flight on a quick open→close, and letting the QThread outlive
+        its parent widget aborts the process on app exit. Bounded wait only —
+        terminate() mid-``import torch`` can deadlock the interpreter.
+        """
+        self._device_worker.wait(timeout_ms)
+
+    def _on_devices_detected(self, devices: list) -> None:
+        """Swap placeholder device items for the probed list; keep user input."""
+        current = self._device_combo.currentText()
+        self._device_combo.clear()
+        self._device_combo.addItems(devices)
+        if current and current not in devices:
+            self._device_combo.setCurrentText(current)
 
     def _connect_signals(self) -> None:
         self._task_combo.currentTextChanged.connect(self._on_task_changed)

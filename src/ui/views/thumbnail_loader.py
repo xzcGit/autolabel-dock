@@ -44,8 +44,17 @@ class ThumbnailLoader(QThread):
 
     def stop(self) -> None:
         self._stop = True
+        # Drop the backlog so wait() during teardown doesn't run until the
+        # queue drains (replaced queues from a newer set_project are dead
+        # weight anyway).
+        self._mu.lock()
+        try:
+            self._queue.clear()
+        finally:
+            self._mu.unlock()
 
     def run(self) -> None:
+        self._stop = False
         while not self._stop:
             self._mu.lock()
             try:

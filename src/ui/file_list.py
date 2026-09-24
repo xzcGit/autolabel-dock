@@ -164,6 +164,31 @@ class FileListWidget(QListWidget):
         self._apply_filter()
         self.blockSignals(False)
 
+    def merge_metadata(
+        self,
+        statuses: dict[str, str],
+        classes: dict[str, set[str]],
+        tags: dict[str, set[str]],
+    ) -> None:
+        """Merge background-scanned metadata in place (no rebuild).
+
+        Keeps the current row/selection, and entries already set since the
+        scan started (user edits) win over the older scanned values.
+        """
+        for key, status in statuses.items():
+            if key not in self._statuses:
+                self.set_status(Path(key), status)
+        for key, v in classes.items():
+            self._image_classes.setdefault(key, set(v))
+        for key, v in tags.items():
+            self._image_tags.setdefault(key, set(v))
+        if not (
+            self._filter is None
+            and self._class_filter is None
+            and self._tag_filter.is_empty()
+        ):
+            self._apply_filter()
+
     def set_status(self, path: Path, status: str) -> None:
         """Update the status of an image file."""
         self._statuses[str(path)] = status

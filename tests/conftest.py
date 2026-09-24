@@ -1,7 +1,13 @@
 """Shared test fixtures."""
 import json
+import os
 import shutil
 from pathlib import Path
+
+# Run project-open label scans synchronously in tests: the async
+# LabelScanWorker finishes non-deterministically under qapp.processEvents()
+# and would make view assertions racy. The production path stays threaded.
+os.environ.setdefault("AUTOLABEL_SYNC_SCAN", "1")
 
 import pytest
 

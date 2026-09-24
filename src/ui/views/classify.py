@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
@@ -511,7 +513,8 @@ class ClassifyView(TaskView):
         self.image_focus_changed.connect(self._preview.set_image)
 
     def cleanup(self) -> None:
-        """Stop background loader. Call before discarding view."""
+        """Stop background loader + label scan. Call before discarding view."""
+        self._stop_label_scan()
         loader = getattr(self, "_loader", None)
         if loader is None:
             return
@@ -660,11 +663,16 @@ class ClassifyView(TaskView):
 
         self._grid.clear()
         icon_size = self._grid.iconSize()
+        # Items go in immediately with the placeholder ("未标") visual; the
+        # real per-image label scan runs off the GUI thread so opening a
+        # large project never freezes the window (see LabelScanWorker).
+        unlabeled = _compute_visual_state(
+            ImageAnnotation(image_path="", image_size=(1, 1)), self._class_colors
+        )
         for img in project.list_images():
-            ia = self._store.load_or_empty(project.label_path_for(img), img.name)
-            visual = _compute_visual_state(ia, self._class_colors)
-            self._grid.add_image_item(img, visual, pixmap=None)
+            self._grid.add_image_item(img, unlabeled, pixmap=None)
             self._loader.enqueue(img, icon_size)
+        self._start_label_scan(project)
 
         # Apply persisted sort (after items are present).
         target_idx = 0 if self._state.grid_sort == "filename" else 1
@@ -675,6 +683,54 @@ class ClassifyView(TaskView):
             self._resort_items("class")
 
         self._apply_persisted_preview_state()
+        self._update_confirm_all_count()
+
+    # ── Background label scan (project open) ───────────────────
+
+    def _start_label_scan(self, project: ProjectManager) -> None:
+        self._stop_label_scan()
+        from src.ui.views.label_scan_worker import LabelScanWorker, scan_labels
+        # No flush here: LabelPanel.set_project flushed before building this
+        # view, and the flush callback touches Qt widgets (never off-thread).
+        self._scan_started_ns = time.time_ns()
+        if os.environ.get("AUTOLABEL_SYNC_SCAN"):  # test seam: deterministic tests
+            self._on_label_scan_finished(*scan_labels(project, self._store.load_unflushed))
+            return
+        worker = LabelScanWorker(project, self._store.load_unflushed, self)
+        worker.scan_done.connect(self._on_label_scan_finished)
+        self._scan_worker = worker
+        worker.start()
+
+    def _stop_label_scan(self) -> None:
+        worker = getattr(self, "_scan_worker", None)
+        if worker is not None:
+            worker.stop()
+            worker.wait(2000)
+            self._scan_worker = None
+
+    def _on_label_scan_finished(self, project, statuses, classes, tags, records) -> None:
+        # Ignore a stale scan that outlived a project switch/teardown.
+        if project is not self._project:
+            return
+        self._bulk_auto_label_updates += 1  # don't touch confirm-all count per item
+        try:
+            started = getattr(self, "_scan_started_ns", 0)
+            for path_str, ia in records.items():
+                # A class click during the scan saved a newer record — the
+                # snapshot is stale for that image, so re-read it.
+                label_path = project.label_path_for(Path(path_str))
+                try:
+                    if label_path.stat().st_mtime_ns >= started:
+                        ia = self._store.load_or_empty(label_path, Path(path_str).name)
+                except OSError:
+                    continue
+                self._grid.update_visual(
+                    Path(path_str), _compute_visual_state(ia, self._class_colors)
+                )
+        finally:
+            self._bulk_auto_label_updates -= 1
+        if self._state.grid_sort == "class":
+            self._resort_items("class")
         self._update_confirm_all_count()
 
     def _apply_persisted_preview_state(self) -> None:
